@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import colorsys
 import curses
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,7 +22,7 @@ from pathlib import Path
 # Paths
 # ============================================================
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # --dry-run: всё рендерится и проверяется, но конфиги, обои,
 # state и пресеты не меняются, перезагрузок нет.
@@ -41,9 +44,6 @@ CACHE = Path.home() / ".cache/vnature"
 MATUGEN_DIR = CACHE / "matugen"
 GENERATED = CACHE / "generated"
 
-MATUGEN_CONFIG = MATUGEN_DIR / "config.toml"
-MATUGEN_PALETTE = MATUGEN_DIR / "palette.conf"
-
 POLYBAR_GENERATED = GENERATED / "polybar.ini"
 ROFI_GENERATED = GENERATED / "rofi.rasi"
 
@@ -52,8 +52,7 @@ SWAYNC_THEME = Path.home() / ".config/swaync/vnature.css"
 WAYBAR_THEME = Path.home() / ".config/waybar/vnature.css"
 OBSIDIAN_GENERATED = GENERATED / "obsidian.css"
 
-KITTY_THEMES = Path.home() / ".config/kitty/themes"
-KITTY_THEME = KITTY_THEMES / "VNature.conf"
+KITTY_THEME = Path.home() / ".config/kitty/vnature.conf"
 
 POLYBAR_LAUNCH = Path.home() / ".config/polybar/launch.sh"
 
@@ -67,10 +66,27 @@ IMAGE_EXTENSIONS = {
     ".jxl",
 }
 
+# Режимы kitty — единственный список. surface: насколько фон и текст
+# уходят от базы к палитре; ansi: насколько яркость и насыщенность
+# 16 ANSI-цветов уходят к палитре (оттенок всегда остаётся от базы).
+# None — чистая база (kitty_base или STABLE), палитра не подмешивается.
 KITTY_MODES = {
-    "accent",
-    "balanced",
-    "full",
+    "accent": (
+        "Accent — минимум изменений",
+        {"surface": 0.06, "ansi": 0.0},
+    ),
+    "balanced": (
+        "Balanced — адаптивно",
+        {"surface": 0.35, "ansi": 0.4},
+    ),
+    "full": (
+        "Full — ебашим",
+        {"surface": 1.0, "ansi": 0.8},
+    ),
+    "off": (
+        "Off — чистая база, без палитры",
+        None,
+    ),
 }
 
 
@@ -179,6 +195,7 @@ def load_config(
         "wallpaper_dir": wallpaper_dir,
         "mode": str(raw.get("mode", "dark")),
         "kitty_mode": kitty_mode,
+        "kitty_base": raw.get("kitty_base"),
     }
 
 
@@ -392,9 +409,7 @@ def load_preset(name):
 
         if mode in (
             "inherit",
-            "accent",
-            "balanced",
-            "full",
+            *KITTY_MODES,
         ):
             metadata["kitty_mode"] = mode
 
@@ -408,9 +423,7 @@ def save_preset_meta(
 ):
     if kitty_mode not in (
         "inherit",
-        "accent",
-        "balanced",
-        "full",
+        *KITTY_MODES,
     ):
         raise VNatureError(
             f"неизвестный kitty_mode: "
@@ -900,7 +913,14 @@ def render_template(
 # Kitty modes
 # ============================================================
 
+# База для kitty, если kitty_base в config.toml не задан.
 STABLE = {
+    "background": "#1d1d1d",
+    "foreground": "#f7f6ec",
+
+    "inactive_tab_background": "#171717",
+    "inactive_tab_foreground": "#b1b5ae",
+
     "color0": "#343835",
     "color8": "#585a58",
 
@@ -926,349 +946,259 @@ STABLE = {
     "color15": "#b1b5ae",
 }
 
+# Цветные ANSI: из роли палитры берём только яркость и насыщенность.
+ANSI_ROLES = {
+    "color1": "error",
+    "color9": "error",
+    "color2": "tertiary",
+    "color10": "tertiary",
+    "color3": "tertiary",
+    "color11": "tertiary",
+    "color4": "secondary",
+    "color12": "secondary",
+    "color5": "primary",
+    "color13": "primary",
+    "color6": "secondary",
+    "color14": "secondary",
+}
+
+# Нейтральные ANSI смешиваются с палитрой целиком.
+NEUTRAL_ROLES = {
+    "color0": "surface_container_high",
+    "color8": "outline",
+    "color7": "foreground",
+    "color15": "foreground_muted",
+}
+
+TEXT_CONTRAST = 4.5
+COLOR0_CONTRAST = 1.25
+
+
+def luminance(value):
+    def channel(c):
+        c /= 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = map(channel, hex_rgb(value))
+
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    # WCAG 2.x contrast ratio
+    light, dark = sorted(
+        (luminance(a), luminance(b)),
+        reverse=True,
+    )
+
+    return (light + 0.05) / (dark + 0.05)
+
+
+def to_hls(value):
+    return colorsys.rgb_to_hls(
+        *(c / 255 for c in hex_rgb(value))
+    )
+
+
+def from_hls(h, l, s):
+    return rgb_hex(
+        c * 255
+        for c in colorsys.hls_to_rgb(h, l, s)
+    )
+
+
+def ensure_contrast(color, against, ratio):
+    # Двигаем только яркость, оттенок сохраняется.
+    if contrast(color, against) >= ratio:
+        return color
+
+    h, l, s = to_hls(color)
+
+    for step in range(1, 101):
+        for sign in (1, -1):
+            candidate = from_hls(
+                h,
+                min(1.0, max(0.0, l + sign * step / 100)),
+                s,
+            )
+
+            if contrast(candidate, against) >= ratio:
+                return candidate
+
+    return max(
+        ("#ffffff", "#000000"),
+        key=lambda c: contrast(c, against),
+    )
+
+
+def shift_ansi(base, target, amount):
+    # Оттенок от базы; яркость и насыщенность — к роли палитры.
+    # Цель зажата, чтобы цвет не выцвел в серый и не ушёл в чёрный/белый.
+    h, l, s = to_hls(base)
+    _, target_l, target_s = to_hls(target)
+
+    target_l = min(0.80, max(0.35, target_l))
+    target_s = max(0.35, target_s)
+
+    return from_hls(
+        h,
+        l + (target_l - l) * amount,
+        s + (target_s - s) * amount,
+    )
+
+
+def kitty_base(cfg):
+    raw = cfg.get("kitty_base")
+
+    if not raw:
+        return STABLE
+
+    path = expand(raw)
+
+    if not path.is_absolute():
+        path = CONFIG_DIR / path
+
+    if not path.is_file():
+        raise VNatureError(
+            f"нет kitty_base: {path}"
+        )
+
+    base = dict(STABLE)
+
+    for line in path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+
+        parts = line.split()
+
+        if len(parts) < 2 or parts[0] not in STABLE:
+            continue
+
+        value = parts[1].lower()
+
+        if not (
+            len(value) == 7
+            and value.startswith("#")
+            and all(c in "0123456789abcdef" for c in value[1:])
+        ):
+            raise VNatureError(
+                f"kitty_base {path}: {parts[0]} {parts[1]} "
+                "— нужен цвет вида #rrggbb"
+            )
+
+        base[parts[0]] = value
+
+    return base
+
 
 def kitty_colors(
     palette,
     mode,
+    base=STABLE,
 ):
-    base_bg = "#1d1d1d"
-    base_fg = "#f7f6ec"
-
-    if mode == "accent":
-
-        result = {
-            "kitty_background":
-                base_bg,
-
-            "kitty_foreground":
-                base_fg,
-
-            "kitty_cursor":
-                palette["tertiary"],
-
-            "kitty_selection_bg":
-                palette[
-                    "primary_container"
-                ],
-
-            "kitty_selection_fg":
-                base_fg,
-
-            "kitty_active_tab_fg":
-                base_fg,
-
-            "kitty_active_tab_bg":
-                palette[
-                    "primary_container"
-                ],
-
-            "kitty_inactive_tab_fg":
-                "#b1b5ae",
-
-            "kitty_inactive_tab_bg":
-                "#171717",
-
-            "kitty_url":
-                palette["primary"],
-
-            "kitty_active_border":
-                palette[
-                    "primary_container"
-                ],
-        }
-
-        for key, value in (
-            STABLE.items()
-        ):
-            result[
-                "kitty_" + key
-            ] = value
-
-        return result
-
-    if mode == "balanced":
-
-        bg = mix(
-            base_bg,
-            palette["background"],
-            0.35,
+    if mode not in KITTY_MODES:
+        raise VNatureError(
+            f"неизвестный kitty_mode: {mode}"
         )
 
-        fg = mix(
-            base_fg,
+    params = KITTY_MODES[mode][1]
+
+    if params is None:
+        # Ни одного цвета из палитры: только база.
+        return {
+            "kitty_background": base["background"],
+            "kitty_foreground": base["foreground"],
+
+            "kitty_cursor": base["foreground"],
+            "kitty_selection_bg": base["color8"],
+            "kitty_selection_fg": base["foreground"],
+
+            "kitty_active_tab_fg": base["foreground"],
+            "kitty_active_tab_bg": base["color8"],
+            "kitty_inactive_tab_fg": base["inactive_tab_foreground"],
+            "kitty_inactive_tab_bg": base["inactive_tab_background"],
+
+            "kitty_url": base["color4"],
+            "kitty_active_border": base["color8"],
+
+            **{
+                f"kitty_color{n}": base[f"color{n}"]
+                for n in range(16)
+            },
+        }
+
+    surface = params["surface"]
+    ansi = params["ansi"]
+
+    bg = mix(
+        base["background"],
+        palette["background"],
+        surface,
+    )
+
+    fg = ensure_contrast(
+        mix(
+            base["foreground"],
             palette["foreground"],
-            0.30,
-        )
+            surface,
+        ),
+        bg,
+        TEXT_CONTRAST,
+    )
 
-        mappings = {
-            "color0": (
-                bg,
-                0.45,
-            ),
-
-            "color8": (
-                palette["outline"],
-                0.25,
-            ),
-
-            "color1": (
-                palette["error"],
-                0.35,
-            ),
-
-            "color9": (
-                palette["error"],
-                0.20,
-            ),
-
-            "color2": (
-                palette["tertiary"],
-                0.22,
-            ),
-
-            "color10": (
-                palette["tertiary"],
-                0.28,
-            ),
-
-            "color3": (
-                palette["tertiary"],
-                0.30,
-            ),
-
-            "color11": (
-                palette["tertiary"],
-                0.25,
-            ),
-
-            "color4": (
-                palette["secondary"],
-                0.20,
-            ),
-
-            "color12": (
-                palette["secondary"],
-                0.20,
-            ),
-
-            "color5": (
-                palette["primary"],
-                0.15,
-            ),
-
-            "color13": (
-                palette["primary"],
-                0.15,
-            ),
-
-            "color6": (
-                palette["secondary"],
-                0.30,
-            ),
-
-            "color14": (
-                palette["secondary"],
-                0.25,
-            ),
-
-            "color7": (
-                fg,
-                0.40,
-            ),
-
-            "color15": (
-                fg,
-                0.25,
-            ),
-        }
-
-        result = {
-            "kitty_background":
-                bg,
-
-            "kitty_foreground":
-                fg,
-
-            "kitty_cursor":
-                palette["tertiary"],
-
-            "kitty_selection_bg":
-                mix(
-                    bg,
-                    palette[
-                        "primary_container"
-                    ],
-                    0.75,
-                ),
-
-            "kitty_selection_fg":
-                fg,
-
-            "kitty_active_tab_fg":
-                fg,
-
-            "kitty_active_tab_bg":
-                mix(
-                    bg,
-                    palette[
-                        "primary_container"
-                    ],
-                    0.70,
-                ),
-
-            "kitty_inactive_tab_fg":
-                mix(
-                    "#b1b5ae",
-                    palette[
-                        "foreground_muted"
-                    ],
-                    0.25,
-                ),
-
-            "kitty_inactive_tab_bg":
-                mix(
-                    "#171717",
-                    palette[
-                        "surface_container_low"
-                    ],
-                    0.35,
-                ),
-
-            "kitty_url":
-                mix(
-                    "#389aac",
-                    palette[
-                        "secondary"
-                    ],
-                    0.35,
-                ),
-
-            "kitty_active_border":
-                palette[
-                    "primary_container"
-                ],
-        }
-
-        for key, (
-            target,
-            amount,
-        ) in mappings.items():
-
-            result[
-                "kitty_" + key
-            ] = mix(
-                STABLE[key],
-                target,
-                amount,
-            )
-
-        return result
-
-    # full
+    accent_fg = ensure_contrast(
+        fg,
+        palette["primary_container"],
+        TEXT_CONTRAST,
+    )
 
     result = {
-        "kitty_background":
-            palette["background"],
+        "kitty_background": bg,
+        "kitty_foreground": fg,
 
-        "kitty_foreground":
-            palette["foreground"],
+        "kitty_cursor": palette["primary"],
+        "kitty_selection_bg": palette["primary_container"],
+        "kitty_selection_fg": accent_fg,
 
-        "kitty_cursor":
-            palette["primary"],
+        "kitty_active_tab_fg": accent_fg,
+        "kitty_active_tab_bg": palette["primary_container"],
 
-        "kitty_selection_bg":
-            palette[
-                "primary_container"
-            ],
+        "kitty_inactive_tab_fg": mix(
+            base["inactive_tab_foreground"],
+            palette["foreground_muted"],
+            surface,
+        ),
 
-        "kitty_selection_fg":
-            palette["foreground"],
+        "kitty_inactive_tab_bg": mix(
+            base["inactive_tab_background"],
+            palette["surface_container_low"],
+            surface,
+        ),
 
-        "kitty_active_tab_fg":
-            palette["foreground"],
-
-        "kitty_active_tab_bg":
-            palette[
-                "primary_container"
-            ],
-
-        "kitty_inactive_tab_fg":
-            palette[
-                "foreground_muted"
-            ],
-
-        "kitty_inactive_tab_bg":
-            palette[
-                "surface_container_low"
-            ],
-
-        "kitty_url":
-            palette["secondary"],
-
-        "kitty_active_border":
-            palette["primary"],
+        "kitty_url": palette["primary"],
+        "kitty_active_border": palette["primary"],
     }
 
-    targets = {
-        "color0":
-            palette["background"],
-
-        "color8":
-            palette["outline"],
-
-        "color1":
-            palette["error"],
-
-        "color9":
-            palette["error"],
-
-        "color2":
-            palette["tertiary"],
-
-        "color10":
-            palette["tertiary"],
-
-        "color3":
-            palette["tertiary"],
-
-        "color11":
-            palette["tertiary"],
-
-        "color4":
-            palette["secondary"],
-
-        "color12":
-            palette["secondary"],
-
-        "color5":
-            palette["primary"],
-
-        "color13":
-            palette["primary"],
-
-        "color6":
-            palette["secondary"],
-
-        "color14":
-            palette["secondary"],
-
-        "color7":
-            palette["foreground"],
-
-        "color15":
-            palette["foreground"],
-    }
-
-    for key, target in (
-        targets.items()
-    ):
-        result[
-            "kitty_" + key
-        ] = mix(
-            STABLE[key],
-            target,
-            0.70,
+    for key, role in ANSI_ROLES.items():
+        result["kitty_" + key] = shift_ansi(
+            base[key],
+            palette[role],
+            ansi,
         )
+
+    for key, role in NEUTRAL_ROLES.items():
+        result["kitty_" + key] = mix(
+            base[key],
+            palette[role],
+            ansi,
+        )
+
+    # color0 часто служит фоном панелей — не должен слиться с фоном.
+    result["kitty_color0"] = ensure_contrast(
+        result["kitty_color0"],
+        bg,
+        COLOR0_CONTRAST,
+    )
 
     return result
 
@@ -1435,6 +1365,7 @@ def render_apps(
     palette_file,
     kitty_mode,
     stage,
+    base=STABLE,
 ):
     # Только рендер и проверка в stage/rendered, реальные файлы не трогаем.
     palette = read_palette(
@@ -1477,15 +1408,10 @@ def render_apps(
         .lstrip("#")
     )
 
-    kitty = dict(
-        palette
-    )
-
-    kitty.update(
-        kitty_colors(
-            palette,
-            kitty_mode,
-        )
+    kitty = kitty_colors(
+        palette,
+        kitty_mode,
+        base,
     )
 
     # шаблон, куда, папка приложения (None — пишем в кэш всегда), значения
@@ -1496,7 +1422,7 @@ def render_apps(
         ("swaync.css", SWAYNC_THEME, SWAYNC_THEME.parent, palette),
         ("waybar.css", WAYBAR_THEME, WAYBAR_THEME.parent, palette),
         ("obsidian.css", OBSIDIAN_GENERATED, None, palette),
-        ("kitty.conf", KITTY_THEME, KITTY_THEMES.parent, kitty),
+        ("kitty.conf", KITTY_THEME, KITTY_THEME.parent, {**palette, **kitty}),
     ]
 
     rendered_dir = (
@@ -1659,22 +1585,29 @@ def reload_swaync():
 
 
 def reload_kitty():
-    if shutil.which(
-        "kitten"
-    ) is None:
-        return
+    # kitty >= 0.49 перечитывает kitty.conf вместе с include по SIGUSR1
+    # (man kitty.conf). Сигналим только своим процессам с comm == kitty.
+    for process in Path("/proc").iterdir():
 
-    subprocess.run(
-        [
-            "kitten",
-            "themes",
-            "--reload-in=all",
-            "VNature",
-        ],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        if not process.name.isdigit():
+            continue
+
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+
+            if (
+                process / "comm"
+            ).read_text().strip() != "kitty":
+                continue
+
+            os.kill(
+                int(process.name),
+                signal.SIGUSR1,
+            )
+
+        except OSError:
+            continue
 
 
 # ============================================================
@@ -1691,7 +1624,8 @@ def build_stage(
     stage = Path(
         tempfile.mkdtemp(
             prefix="stage-",
-            dir=CACHE,
+            # dry-run не пишет даже во временные папки ~/.cache/vnature
+            dir=None if DRY_RUN else CACHE,
         )
     )
 
@@ -1761,7 +1695,7 @@ def dry_run_report(
     )
 
 
-def commit_stage(stage):
+def commit_stage(stage, cfg):
     try:
         palette = (
             stage
@@ -1791,6 +1725,7 @@ def commit_stage(stage):
             palette,
             state["kitty_mode"],
             stage,
+            kitty_base(cfg),
         )
 
         if DRY_RUN:
@@ -1914,7 +1849,8 @@ def apply_preset(
     )
 
     commit_stage(
-        stage
+        stage,
+        cfg,
     )
 
     if DRY_RUN:
@@ -1926,11 +1862,128 @@ def apply_preset(
     )
 
 
+def current_kitty_target(
+    state,
+    cfg,
+    preset_modes=None,
+):
+    # Какой kitty_mode должен быть у текущей темы при нынешних настройках.
+    # None — темы нет или её пресет не найден: трогать нечего.
+    # preset_modes: {имя: режим} поверх preset.toml (нужно для --dry-run).
+    if state is None:
+        return None
+
+    name = state["name"]
+
+    if name == "__temporary__":
+        return cfg["kitty_mode"]
+
+    if preset_modes and name in preset_modes:
+        mode = preset_modes[name]
+
+    elif preset_exists(name):
+        mode = load_preset(name)["kitty_mode"]
+
+    else:
+        return None
+
+    return effective_kitty_mode(
+        {"kitty_mode": mode},
+        cfg,
+    )
+
+
+def refresh_kitty(
+    cfg,
+    preset_modes=None,
+):
+    # После смены kitty_mode: перерендерить только kitty у текущей темы.
+    # previous не трогаем, чтобы undo возвращал тему, а не режим kitty.
+    state = (
+        read_state(CURRENT)
+        if (CURRENT / "palette.conf").is_file()
+        else None
+    )
+
+    target = current_kitty_target(
+        state,
+        cfg,
+        preset_modes,
+    )
+
+    if (
+        target is None
+        or target == state["kitty_mode"]
+    ):
+        return "сохранено, применится при следующей теме"
+
+    title = (
+        "из картинки "
+        + Path(state["wallpaper"] or "?").name
+        if state["name"] == "__temporary__"
+        else state["name"]
+    )
+
+    stage = Path(
+        tempfile.mkdtemp(
+            prefix="stage-",
+            dir=None if DRY_RUN else CACHE,
+        )
+    )
+
+    try:
+        rendered = render_apps(
+            CURRENT / "palette.conf",
+            target,
+            stage,
+            kitty_base(cfg),
+        )
+
+        kitty_only = {
+            "kitty.conf": rendered["kitty.conf"],
+        }
+
+        if DRY_RUN:
+            dry_run_report(
+                kitty_only,
+                None,
+            )
+            return f"dry-run: применил бы kitty {target} к теме {title}"
+
+        _, installed = install_apps(
+            kitty_only
+        )
+
+    finally:
+        shutil.rmtree(
+            stage,
+            ignore_errors=True,
+        )
+
+    write_state(
+        CURRENT,
+        name=state["name"],
+        wallpaper=(
+            Path(state["wallpaper"])
+            if state.get("wallpaper")
+            else None
+        ),
+        kitty_mode=target,
+    )
+
+    if not installed:
+        return f"kitty {target} для темы {title}: kitty не найден, файл не записан"
+
+    reload_kitty()
+
+    return f"kitty {target} применён к теме {title}"
+
+
 # ============================================================
 # Matugen
 # ============================================================
 
-def prepare_matugen():
+def prepare_matugen(directory):
     require("matugen")
 
     palette_template = (
@@ -1938,7 +1991,7 @@ def prepare_matugen():
         / "palette.conf"
     )
 
-    MATUGEN_CONFIG.write_text(
+    (directory / "config.toml").write_text(
         "[config.wallpaper]\n"
         'command = "feh"\n'
         'arguments = ["--bg-fill"]\n'
@@ -1951,7 +2004,7 @@ def prepare_matugen():
         + "\n"
         "output_path = "
         + toml_string(
-            MATUGEN_PALETTE
+            directory / "palette.conf"
         )
         + "\n",
         encoding="utf-8",
@@ -1962,17 +2015,20 @@ def generate_palette(
     image,
     cfg,
     poh=False,
+    directory=MATUGEN_DIR,
 ):
-    prepare_matugen()
+    prepare_matugen(directory)
 
-    MATUGEN_PALETTE.unlink(
+    palette = directory / "palette.conf"
+
+    palette.unlink(
         missing_ok=True
     )
 
     command = [
         "matugen",
         "-c",
-        str(MATUGEN_CONFIG),
+        str(directory / "config.toml"),
 
         "image",
         str(image),
@@ -1992,12 +2048,12 @@ def generate_palette(
         check=True,
     )
 
-    if not MATUGEN_PALETTE.is_file():
+    if not palette.is_file():
         raise VNatureError(
             "Matugen не создал palette"
         )
 
-    return MATUGEN_PALETTE
+    return palette
 
 
 def apply_image(
@@ -2015,27 +2071,51 @@ def apply_image(
             f"нет картинки: {image}"
         )
 
-    palette = generate_palette(
-        image,
-        cfg,
-        poh,
-    )
+    matugen_dir = MATUGEN_DIR
 
-    stage = build_stage(
-        palette,
+    if DRY_RUN:
+        matugen_dir = Path(
+            tempfile.mkdtemp(
+                prefix="vnature-matugen-",
+            )
+        )
 
-        name="__temporary__",
+        info(
+            "dry-run: matugen всё равно запускается, "
+            f"его конфиг и палитра — во временной {matugen_dir}"
+        )
 
-        wallpaper=image,
+    try:
+        palette = generate_palette(
+            image,
+            cfg,
+            poh,
+            matugen_dir,
+        )
 
-        kitty_mode=cfg[
-            "kitty_mode"
-        ],
-    )
+        stage = build_stage(
+            palette,
 
-    commit_stage(
-        stage
-    )
+            name="__temporary__",
+
+            wallpaper=image,
+
+            kitty_mode=cfg[
+                "kitty_mode"
+            ],
+        )
+
+        commit_stage(
+            stage,
+            cfg,
+        )
+
+    finally:
+        if DRY_RUN:
+            shutil.rmtree(
+                matugen_dir,
+                ignore_errors=True,
+            )
 
     if DRY_RUN:
         return
@@ -2211,7 +2291,7 @@ def delete_preset(name):
 # Undo
 # ============================================================
 
-def go_back():
+def go_back(cfg):
     if not PREVIOUS.exists():
         raise VNatureError(
             "предыдущего говна нет"
@@ -2235,7 +2315,8 @@ def go_back():
     stage = Path(
         tempfile.mkdtemp(
             prefix="stage-",
-            dir=CACHE,
+            # dry-run не пишет даже во временные папки ~/.cache/vnature
+            dir=None if DRY_RUN else CACHE,
         )
     )
 
@@ -2244,6 +2325,7 @@ def go_back():
             palette,
             state["kitty_mode"],
             stage,
+            kitty_base(cfg),
         )
 
         if DRY_RUN:
@@ -2397,6 +2479,27 @@ def menu(
                 stdscr.getmaxyx()
             )
 
+            if height < 6 or width < 20:
+                # Меню не влезет: просим растянуть окно, ресайз перерисует.
+                try:
+                    stdscr.addnstr(
+                        0,
+                        0,
+                        f"Окно маловато ({height}×{width}), "
+                        "нужно хотя бы 6×20. q — выход",
+                        max(1, width - 1),
+                    )
+                except curses.error:
+                    pass
+
+                if stdscr.getch() in (
+                    27,
+                    ord("q"),
+                ):
+                    return None
+
+                continue
+
             # Строки под пункты: заголовок сверху, подсказка снизу.
             rows = max(
                 1,
@@ -2542,17 +2645,11 @@ def pick_kitty_mode(
 
     modes += [
         (
-            "Accent — минимум изменений",
-            "accent",
-        ),
-        (
-            "Balanced — адаптивно",
-            "balanced",
-        ),
-        (
-            "Full — ебашим",
-            "full",
-        ),
+            label,
+            mode,
+        )
+        for mode, (label, _)
+        in KITTY_MODES.items()
     ]
 
     index = menu(
@@ -2670,9 +2767,10 @@ def interactive_settings(cfg):
         f"{selected}"
     )
 
-    print(
-        "Применится при следующем "
-        "переключении темы."
+    info(
+        refresh_kitty(
+            cfg
+        )
     )
 
     pause()
@@ -2726,6 +2824,13 @@ def interactive_manage(cfg):
                 ),
 
                 kitty_mode=mode,
+            )
+
+            info(
+                refresh_kitty(
+                    cfg,
+                    {name: mode},
+                )
             )
 
     elif action == 1:
@@ -2913,7 +3018,7 @@ def interactive_step(cfg):
         )
 
     elif action == 3:
-        go_back()
+        go_back(cfg)
         pause()
 
     elif action == 4:
@@ -3006,15 +3111,89 @@ def translate_legacy(argv):
     return args + wallpaper
 
 
-def build_parser():
-    # Глобальные флаги принимаются и до, и после команды.
-    common = argparse.ArgumentParser(
-        add_help=False,
-        allow_abbrev=False,
-        argument_default=argparse.SUPPRESS,
+GLOBAL_FLAGS = (
+    "--wallpaper-dir",
+    "--dry-run",
+    "--version",
+    "-h",
+    "--help",
+)
+
+# Сообщения argparse -> сообщения vnature.
+ARGPARSE_ERRORS = (
+    (r"unrecognized arguments: (.*)", "лишние аргументы: {0}"),
+    (r"the following arguments are required: (.*)", "не хватает аргумента: {0}"),
+    (r"argument (\S+): expected one argument", "флагу {0} нужно значение"),
+    (r"argument (\S+): ignored explicit argument '(.*)'", "флаг {0} не принимает значение: {1}"),
+    (r"argument КОМАНДА: invalid choice: '(.*?)'",
+     "не понял: {0} — это не команда, не пресет и не картинка"),
+)
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+
+    def add_usage(self, usage, actions, groups, prefix=None):
+        return super().add_usage(
+            usage,
+            actions,
+            groups,
+            "использование: " if prefix is None else prefix,
+        )
+
+
+class Parser(argparse.ArgumentParser):
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", HelpFormatter)
+        kwargs.setdefault("allow_abbrev", False)
+        kwargs["add_help"] = False
+
+        super().__init__(*args, **kwargs)
+
+        self._positionals.title = "аргументы"
+        self._optionals.title = "флаги"
+
+        self.add_argument(
+            "-h",
+            "--help",
+            action="help",
+            help="показать эту справку",
+        )
+
+    def error(self, message):
+        for pattern, text in ARGPARSE_ERRORS:
+            match = re.match(pattern, message)
+
+            if match:
+                message = text.format(*match.groups())
+                break
+
+        sys.stderr.write(
+            f"vnature: {message}\n"
+            "справка: vnature --help\n"
+        )
+
+        sys.exit(2)
+
+
+def add_global_flags(target, default):
+    target.add_argument(
+        "--wallpaper-dir",
+        metavar="DIR",
+        default=default,
+        help="папка обоев вместо wallpaper_dir из config.toml",
     )
 
-    parser = argparse.ArgumentParser(
+    target.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=default or False,
+        help="всё проверить, но ничего не менять",
+    )
+
+
+def build_parser():
+    parser = Parser(
         prog="vnature",
         description=(
             "Темы для Hyprland из обоев через matugen. "
@@ -3027,32 +3206,15 @@ def build_parser():
             "  vnature PATH           = image PATH\n"
             "  vnature --poh PATH     = image PATH --first-color"
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        allow_abbrev=False,
     )
 
-    for target, default in (
-        (parser, None),
-        (common, argparse.SUPPRESS),
-    ):
-        target.add_argument(
-            "--wallpaper-dir",
-            metavar="DIR",
-            default=default,
-            help="папка обоев вместо wallpaper_dir из config.toml",
-        )
-
-        target.add_argument(
-            "--dry-run",
-            action="store_true",
-            default=default or False,
-            help="всё проверить, но ничего не менять",
-        )
+    add_global_flags(parser, None)
 
     parser.add_argument(
         "--version",
         action="version",
         version=f"vnature {VERSION}",
+        help="показать версию",
     )
 
     commands = parser.add_subparsers(
@@ -3065,7 +3227,7 @@ def build_parser():
         aliases, text = COMMANDS[name]
 
         # "--eblo PRESET" и "--poh PATH" — не алиасы argparse, только для справки
-        return commands.add_parser(
+        command = commands.add_parser(
             name,
             aliases=[a for a in aliases if not a.startswith("-")],
             help=text + "".join(
@@ -3073,9 +3235,12 @@ def build_parser():
                 for a in aliases
                 if a.startswith("-")
             ),
-            parents=[common],
-            allow_abbrev=False,
         )
+
+        # Глобальные флаги принимаются и после команды.
+        add_global_flags(command, argparse.SUPPRESS)
+
+        return command
 
     def wallpaper_flag(command, text):
         command.add_argument(
@@ -3112,8 +3277,26 @@ def build_parser():
 
 
 def parse_args(argv):
-    args = build_parser().parse_args(
-        translate_legacy(argv)
+    parser = build_parser()
+    argv = translate_legacy(argv)
+
+    # Иначе "--wall /x kto" даёт непонятное "invalid choice: '/x'".
+    for token in argv:
+        if not token.startswith("-"):
+            break
+
+        if token in WALLPAPER_FLAGS:
+            parser.error(
+                f"{token} работает только с apply или save"
+            )
+
+        if token.split("=", 1)[0] not in GLOBAL_FLAGS:
+            parser.error(
+                f"неизвестный флаг: {token}"
+            )
+
+    args = parser.parse_args(
+        argv
     )
 
     for name, (aliases, _) in COMMANDS.items():
@@ -3172,7 +3355,7 @@ def main(argv=None):
         )
 
     elif args.command == "undo":
-        go_back()
+        go_back(cfg)
 
     elif args.command == "list":
         show_presets()
