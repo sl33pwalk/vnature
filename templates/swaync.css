@@ -1,0 +1,37 @@
+.control-center {
+    background: {{surface_container_low}};
+    color: {{foreground}};
+    border: 2px solid {{primary}};
+    border-radius: 14px;
+}
+
+.control-center .notification-background {
+    background: {{background}};
+    border: 1px solid {{outline}};
+    border-radius: 12px;
+}
+
+.control-center .notification-background .notification {
+    background: transparent;
+    color: {{foreground}};
+}
+
+.control-center .widget-title > label,
+.control-center .widget-dnd > label {
+    color: {{foreground}};
+}
+
+.control-center .widget-title button {
+    background: {{surface_container_low}};
+    color: {{foreground}};
+    border: 1px solid {{outline}};
+    border-radius: 10px;
+}
+
+.control-center .widget-title button:hover {
+    background: {{primary_container}};
+}
+
+.widget-dnd > switch:checked {
+    background: {{primary}};
+}

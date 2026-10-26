@@ -1,0 +1,237 @@
+body.theme-dark {
+    /* ========================================================
+       VNATURE / OBSIDIAN
+       Stable graphite surfaces + dynamic accent
+       ======================================================== */
+
+    /* Surfaces */
+    --background-primary: #1d1f20;
+    --background-primary-alt: #202223;
+
+    --background-secondary: #17191a;
+    --background-secondary-alt: #1b1d1e;
+
+    --background-modifier-form-field: #242627;
+    --background-modifier-message: #242627;
+
+    /* Borders */
+    --background-modifier-border:
+        color-mix(in oklch, {{outline}} 28%, transparent);
+
+    --background-modifier-border-hover:
+        color-mix(in oklch, {{primary}} 55%, transparent);
+
+    --background-modifier-border-focus:
+        {{primary}};
+
+    /* Hover states */
+    --background-modifier-hover:
+        color-mix(in oklch, {{primary}} 7%, #242627);
+
+    --background-modifier-active-hover:
+        color-mix(in oklch, {{primary}} 12%, #242627);
+
+    /* Text */
+    --text-normal: #dedfdc;
+    --text-muted: #9da2a1;
+    --text-faint: #6f7474;
+
+    --text-accent: {{primary}};
+    --text-accent-hover: {{secondary}};
+
+    --text-on-accent: #101112;
+
+    /* Selection */
+    --text-selection:
+        color-mix(in oklch, {{primary}} 27%, transparent);
+
+    --text-highlight-bg:
+        color-mix(in oklch, {{tertiary}} 22%, transparent);
+
+    --caret-color: {{primary}};
+
+    /* Controls */
+    --interactive-normal: #252728;
+
+    --interactive-hover:
+        color-mix(in oklch, {{primary}} 9%, #292b2c);
+
+    --interactive-accent: {{primary}};
+    --interactive-accent-hover: {{secondary}};
+
+    /* Tabs */
+    --tab-container-background: #17191a;
+    --tab-background-active: #222425;
+
+    --tab-text-color: #777c7e;
+    --tab-text-color-active: #c7c9c7;
+    --tab-text-color-focused: #aaaead;
+    --tab-text-color-focused-active: #eeeeea;
+    --tab-text-color-focused-active-current: #f5f5f0;
+
+    --tab-divider-color:
+        color-mix(in oklch, {{outline}} 20%, transparent);
+
+    --tab-outline-color:
+        color-mix(in oklch, {{outline}} 25%, transparent);
+
+    /* Modals */
+    --modal-background: #1d1f20;
+    --modal-border-color:
+        color-mix(in oklch, {{primary}} 35%, transparent);
+}
+
+
+/* ============================================================
+   FILE EXPLORER
+   Active file: subtle tint + accent rail.
+   ============================================================ */
+
+body.theme-dark .nav-file-title {
+    color: var(--text-muted);
+    border-radius: 5px;
+}
+
+body.theme-dark .nav-file-title:hover {
+    color: var(--text-normal);
+
+    background:
+        color-mix(
+            in oklch,
+            {{primary}} 7%,
+            #242627
+        );
+}
+
+body.theme-dark .nav-file-title.is-active {
+    color: #f3f3ee;
+
+    background:
+        color-mix(
+            in oklch,
+            {{primary}} 14%,
+            #242627
+        );
+
+    box-shadow:
+        inset 2px 0 0 {{primary}};
+}
+
+
+/* ============================================================
+   DOCUMENT TABS
+   Don't fill the whole tab with accent.
+   Accent only marks the active document.
+   ============================================================ */
+
+body.theme-dark
+.workspace-tab-header.is-active {
+    background: #222425;
+
+    box-shadow:
+        inset 0 -2px 0 {{primary}};
+}
+
+body.theme-dark
+.workspace-tab-header.is-active
+.workspace-tab-header-inner-title {
+    color: #f3f3ee;
+    font-weight: 500;
+}
+
+body.theme-dark
+.workspace-tab-header:not(.is-active)
+.workspace-tab-header-inner-title {
+    color: #858a8b;
+}
+
+body.theme-dark
+.workspace-tab-header:not(.is-active):hover
+.workspace-tab-header-inner-title {
+    color: #c2c5c4;
+}
+
+
+/* ============================================================
+   CODE
+   Readable graphite syntax — accent, not rainbow.
+   ============================================================ */
+
+body.theme-dark {
+    --code-background: #202223;
+
+    /* Plain source text */
+    --code-normal: #d5d7d3;
+
+    /* Comments should be secondary, not invisible */
+    --code-comment: #8f9695;
+
+    /* VNature accents */
+    --code-keyword: {{primary}};
+    --code-function: {{secondary}};
+    --code-string: {{tertiary}};
+    --code-value: {{secondary}};
+
+    /* Structure stays neutral */
+    --code-operator: #b5b9b7;
+    --code-punctuation: #9da3a1;
+    --code-property: #c5c8c5;
+
+    /* Avoid random red everywhere */
+    --code-tag: {{primary}};
+    --code-important: #d98c98;
+}
+
+/* Prism / reading-view fallback */
+body.theme-dark code {
+    color: var(--code-normal);
+}
+
+body.theme-dark .token.comment,
+body.theme-dark .token.prolog,
+body.theme-dark .token.doctype,
+body.theme-dark .token.cdata {
+    color: var(--code-comment);
+}
+
+body.theme-dark .token.keyword {
+    color: var(--code-keyword);
+}
+
+body.theme-dark .token.string {
+    color: var(--code-string);
+}
+
+body.theme-dark .token.function {
+    color: var(--code-function);
+}
+
+body.theme-dark .token.number,
+body.theme-dark .token.boolean {
+    color: var(--code-value);
+}
+
+/* VNATURE TYPOGRAPHY */
+
+body.theme-dark .markdown-rendered,
+body.theme-dark .markdown-source-view {
+    line-height: 1.62;
+}
+
+body.theme-dark .markdown-rendered strong {
+    color: #f1f1ec;
+}
+
+body.theme-dark .markdown-rendered li::marker {
+    color:
+        color-mix(
+            in oklch,
+            {{primary}} 55%,
+            #8b908f
+        );
+}
+
+body.theme-dark a,
+body.theme-dark .internal-link {
+    color: {{primary}};
+}

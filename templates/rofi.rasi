@@ -1,0 +1,28 @@
+* {
+    /* Stable graphite surfaces */
+    background:          #171717f4;
+    background-raised:   #202020;
+    background-input:    #232323;
+
+    /* Theme typography */
+    foreground:          {{foreground}};
+    foreground-muted:    {{foreground_muted}};
+
+    /*
+     * VNature mood:
+     * theme affects accents, not the whole surface.
+     */
+    accent:              {{primary}};
+    accent-fg:           {{on_primary}};
+
+    /* Same accent, but translucent */
+    accent-soft:         {{primary}}26;
+
+    /* Bright but not fully opaque outer line */
+    outline:             {{primary}}a6;
+
+    scrollbar-track:     #292929;
+
+    error:               {{error}};
+    error-fg:            {{on_error}};
+}

@@ -1,0 +1,54 @@
+@define-color vn_bg {{surface_container_low}};
+@define-color vn_fg {{foreground}};
+@define-color vn_muted {{foreground_muted}};
+@define-color vn_primary {{primary}};
+@define-color vn_primary_container {{primary_container}};
+@define-color vn_outline {{outline}};
+@define-color vn_error {{error}};
+
+window#waybar {
+    color: @vn_fg;
+}
+
+.modules-left,
+.modules-center,
+.modules-right {
+    background: alpha(@vn_bg, 0.94);
+    border-color: alpha(@vn_primary, 0.82);
+}
+
+#workspaces button {
+    color: @vn_muted;
+}
+
+#workspaces button:hover {
+    color: @vn_fg;
+    background: alpha(@vn_primary_container, 0.55);
+}
+
+#workspaces button.active {
+    color: @vn_bg;
+    background: @vn_primary;
+}
+
+#workspaces button.urgent {
+    color: @vn_bg;
+    background: @vn_error;
+}
+
+#submap {
+    color: @vn_primary;
+}
+
+#wireplumber.muted {
+    color: @vn_muted;
+}
+
+tooltip {
+    background: @vn_bg;
+    border-color: @vn_outline;
+}
+
+tooltip label {
+    color: @vn_fg;
+}

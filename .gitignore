@@ -1,0 +1,8 @@
+__pycache__/
+*.bak-*
+*.before-*
+vnature.v0*
+presets.v01-backup/
+
+# Personal saved themes
+presets/

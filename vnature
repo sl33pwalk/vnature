@@ -1,0 +1,2690 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import curses
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+from pathlib import Path
+
+
+# ============================================================
+# Paths
+# ============================================================
+
+ROOT = Path(__file__).resolve().parent
+
+PRESETS = ROOT / "presets"
+TEMPLATES = ROOT / "templates"
+
+CONFIG_DIR = Path.home() / ".config/vnature"
+CONFIG_FILE = CONFIG_DIR / "config.toml"
+
+STATE_DIR = Path.home() / ".local/state/vnature"
+CURRENT = STATE_DIR / "current"
+PREVIOUS = STATE_DIR / "previous"
+
+CACHE = Path.home() / ".cache/vnature"
+MATUGEN_DIR = CACHE / "matugen"
+GENERATED = CACHE / "generated"
+
+MATUGEN_CONFIG = MATUGEN_DIR / "config.toml"
+MATUGEN_PALETTE = MATUGEN_DIR / "palette.conf"
+
+POLYBAR_GENERATED = GENERATED / "polybar.ini"
+ROFI_GENERATED = GENERATED / "rofi.rasi"
+
+HYPRLAND_THEME = Path.home() / ".config/hypr/vnature.lua"
+SWAYNC_THEME = Path.home() / ".config/swaync/vnature.css"
+WAYBAR_THEME = Path.home() / ".config/waybar/vnature.css"
+OBSIDIAN_GENERATED = GENERATED / "obsidian.css"
+
+KITTY_THEMES = Path.home() / ".config/kitty/themes"
+KITTY_THEME = KITTY_THEMES / "VNature.conf"
+
+POLYBAR_LAUNCH = Path.home() / ".config/polybar/launch.sh"
+
+
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".jxl",
+}
+
+KITTY_MODES = {
+    "accent",
+    "balanced",
+    "full",
+}
+
+
+# ============================================================
+# Common
+# ============================================================
+
+class VNatureError(Exception):
+    pass
+
+
+def info(text):
+    print(f"vnature: {text}")
+
+
+def warn(text):
+    print(f"vnature: {text}", file=sys.stderr)
+
+
+def toml_string(value):
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def ensure_dirs():
+    for path in (
+        PRESETS,
+        CONFIG_DIR,
+        STATE_DIR,
+        CACHE,
+        MATUGEN_DIR,
+        GENERATED,
+        KITTY_THEMES,
+    ):
+        path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+
+def require(command):
+    if shutil.which(command) is None:
+        raise VNatureError(
+            f"не найдена команда: {command}"
+        )
+
+
+# ============================================================
+# Config
+# ============================================================
+
+def ensure_config():
+    if CONFIG_FILE.exists():
+        return
+
+    CONFIG_FILE.write_text(
+        'wallpaper_dir = "~/Pictures/wp"\n'
+        'mode = "dark"\n'
+        'kitty_mode = "accent"\n',
+        encoding="utf-8",
+    )
+
+
+def load_config():
+    ensure_config()
+
+    try:
+        with CONFIG_FILE.open("rb") as f:
+            raw = tomllib.load(f)
+    except Exception as error:
+        raise VNatureError(
+            f"не могу прочитать config.toml: {error}"
+        )
+
+    wallpaper_raw = str(
+        raw.get(
+            "wallpaper_dir",
+            "~/Pictures/wp",
+        )
+    )
+
+    wallpaper_dir = Path(
+        os.path.expandvars(
+            os.path.expanduser(
+                wallpaper_raw
+            )
+        )
+    )
+
+    kitty_mode = str(
+        raw.get(
+            "kitty_mode",
+            "accent",
+        )
+    )
+
+    if kitty_mode not in KITTY_MODES:
+        kitty_mode = "accent"
+
+    return {
+        "wallpaper_dir": wallpaper_dir,
+        "wallpaper_dir_raw": wallpaper_raw,
+        "mode": str(raw.get("mode", "dark")),
+        "kitty_mode": kitty_mode,
+    }
+
+
+def save_config(cfg):
+    CONFIG_FILE.write_text(
+        f'wallpaper_dir = {toml_string(cfg["wallpaper_dir_raw"])}\n'
+        f'mode = {toml_string(cfg["mode"])}\n'
+        f'kitty_mode = {toml_string(cfg["kitty_mode"])}\n',
+        encoding="utf-8",
+    )
+
+
+# ============================================================
+# Presets
+# ============================================================
+
+def preset_path(name):
+    return PRESETS / name
+
+
+def preset_exists(name):
+    return (
+        preset_path(name)
+        / "palette.conf"
+    ).is_file()
+
+
+def get_presets():
+    if not PRESETS.exists():
+        return []
+
+    return sorted(
+        directory.name
+        for directory in PRESETS.iterdir()
+        if (
+            directory.is_dir()
+            and
+            (
+                directory
+                / "palette.conf"
+            ).is_file()
+        )
+    )
+
+
+def load_preset(name):
+    directory = preset_path(name)
+
+    if not (
+        directory
+        / "palette.conf"
+    ).is_file():
+        raise VNatureError(
+            f"такого пресета нет: {name}"
+        )
+
+    metadata = {
+        "wallpaper": None,
+        "kitty_mode": "inherit",
+    }
+
+    meta_file = (
+        directory
+        / "preset.toml"
+    )
+
+    if meta_file.is_file():
+        try:
+            with meta_file.open("rb") as f:
+                raw = tomllib.load(f)
+        except Exception as error:
+            raise VNatureError(
+                f"битый preset.toml "
+                f"у {name}: {error}"
+            )
+
+        if raw.get("wallpaper"):
+            metadata["wallpaper"] = str(
+                raw["wallpaper"]
+            )
+
+        mode = str(
+            raw.get(
+                "kitty_mode",
+                "inherit",
+            )
+        )
+
+        if mode in (
+            "inherit",
+            "accent",
+            "balanced",
+            "full",
+        ):
+            metadata["kitty_mode"] = mode
+
+    return metadata
+
+
+def save_preset_meta(
+    name,
+    wallpaper=None,
+    kitty_mode="inherit",
+):
+    if kitty_mode not in (
+        "inherit",
+        "accent",
+        "balanced",
+        "full",
+    ):
+        raise VNatureError(
+            f"неизвестный kitty_mode: "
+            f"{kitty_mode}"
+        )
+
+    directory = preset_path(name)
+
+    lines = []
+
+    if wallpaper:
+        lines.append(
+            "wallpaper = "
+            + toml_string(wallpaper)
+        )
+
+    lines.append(
+        "kitty_mode = "
+        + toml_string(kitty_mode)
+    )
+
+    (
+        directory
+        / "preset.toml"
+    ).write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def effective_kitty_mode(
+    preset,
+    cfg,
+):
+    mode = preset.get(
+        "kitty_mode",
+        "inherit",
+    )
+
+    if mode == "inherit":
+        return cfg["kitty_mode"]
+
+    return mode
+
+
+# ============================================================
+# Wallpaper
+# ============================================================
+
+def resolve_wallpaper(
+    reference,
+    cfg,
+):
+    path = Path(
+        os.path.expandvars(
+            os.path.expanduser(
+                reference
+            )
+        )
+    )
+
+    if not path.is_absolute():
+        path = (
+            cfg["wallpaper_dir"]
+            / path
+        )
+
+    return path.resolve()
+
+
+def portable_wallpaper(
+    path,
+    cfg,
+):
+    path = path.resolve()
+    library = (
+        cfg["wallpaper_dir"]
+        .resolve()
+    )
+
+    try:
+        return str(
+            path.relative_to(
+                library
+            )
+        )
+    except ValueError:
+        return str(path)
+
+
+def in_hyprland():
+    return bool(
+        os.environ.get(
+            "HYPRLAND_INSTANCE_SIGNATURE"
+        )
+    )
+
+
+def ensure_hyprpaper():
+    require("hyprctl")
+    require("hyprpaper")
+
+    probe = subprocess.run(
+        [
+            "hyprctl",
+            "hyprpaper",
+            "listactive",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    if probe.returncode == 0:
+        return
+
+    subprocess.Popen(
+        ["hyprpaper"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    for _ in range(20):
+        time.sleep(0.1)
+
+        probe = subprocess.run(
+            [
+                "hyprctl",
+                "hyprpaper",
+                "listactive",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if probe.returncode == 0:
+            return
+
+    raise VNatureError(
+        "hyprpaper не поднялся"
+    )
+
+
+def set_hyprland_wallpaper(path):
+    ensure_hyprpaper()
+
+    try:
+        raw = subprocess.check_output(
+            [
+                "hyprctl",
+                "-j",
+                "monitors",
+            ],
+            text=True,
+        )
+
+        monitors = json.loads(raw)
+
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+    ) as error:
+        raise VNatureError(
+            f"не могу получить мониторы Hyprland: {error}"
+        )
+
+    if not monitors:
+        raise VNatureError(
+            "Hyprland не вернул мониторы"
+        )
+
+    # Явно ставим один wallpaper на каждый подключённый
+    # монитор. Так надёжнее fallback wallpaper.
+    for monitor in monitors:
+        name = monitor.get("name")
+
+        if not name:
+            continue
+
+        result = subprocess.run(
+            [
+                "hyprctl",
+                "hyprpaper",
+                "wallpaper",
+                f"{name}, {path}, cover",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            raise VNatureError(
+                "hyprpaper не поставил обои "
+                f"на {name}: "
+                f"{result.stderr.strip()}"
+            )
+
+
+def set_wallpaper(path):
+    path = Path(path).resolve()
+
+    if in_hyprland():
+        set_hyprland_wallpaper(
+            path
+        )
+
+        persist_helper = (
+            Path.home()
+            / ".local/bin/hyprpaper-save-current"
+        )
+
+        if persist_helper.is_file():
+            result = subprocess.run(
+                [
+                    str(persist_helper),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                raise VNatureError(
+                    "обои применены, но не удалось "
+                    "сохранить их для следующего запуска: "
+                    f"{result.stderr.strip()}"
+                )
+
+        return
+
+    # Старый добрый backend для i3/X11.
+    require("feh")
+
+    subprocess.run(
+        [
+            "feh",
+            "--bg-fill",
+            str(path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+# ============================================================
+# State
+# ============================================================
+
+def read_state(directory):
+    meta = (
+        directory
+        / "state.toml"
+    )
+
+    if meta.is_file():
+        with meta.open("rb") as f:
+            raw = tomllib.load(f)
+
+        return {
+            "name": str(
+                raw.get(
+                    "name",
+                    "unknown",
+                )
+            ),
+            "wallpaper": (
+                str(raw["wallpaper"])
+                if raw.get("wallpaper")
+                else None
+            ),
+            "kitty_mode": str(
+                raw.get(
+                    "kitty_mode",
+                    "accent",
+                )
+            ),
+        }
+
+    # Совместимость с v0.1.
+    if not directory.exists():
+        return None
+
+    old_name = directory / "name"
+    old_wallpaper = (
+        directory / "wallpaper"
+    )
+
+    return {
+        "name": (
+            old_name.read_text().strip()
+            if old_name.is_file()
+            else "unknown"
+        ),
+        "wallpaper": (
+            old_wallpaper
+            .read_text()
+            .strip()
+            if old_wallpaper.is_file()
+            else None
+        ),
+        "kitty_mode": "accent",
+    }
+
+
+def write_state(
+    directory,
+    *,
+    name,
+    wallpaper,
+    kitty_mode,
+):
+    lines = [
+        "name = "
+        + toml_string(name),
+
+        "kitty_mode = "
+        + toml_string(
+            kitty_mode
+        ),
+    ]
+
+    if wallpaper:
+        lines.append(
+            "wallpaper = "
+            + toml_string(
+                wallpaper.resolve()
+            )
+        )
+
+    (
+        directory
+        / "state.toml"
+    ).write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def current_wallpaper():
+    state = read_state(CURRENT)
+
+    if not state:
+        return None
+
+    wallpaper = state.get(
+        "wallpaper"
+    )
+
+    if not wallpaper:
+        return None
+
+    return Path(wallpaper)
+
+
+def remember_current():
+    if PREVIOUS.exists():
+        shutil.rmtree(
+            PREVIOUS
+        )
+
+    if CURRENT.exists():
+        shutil.copytree(
+            CURRENT,
+            PREVIOUS,
+        )
+
+
+# ============================================================
+# Palette
+# ============================================================
+
+def read_palette(path):
+    result = {}
+
+    for line in path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+
+        line = line.strip()
+
+        if (
+            not line
+            or line.startswith("#")
+            or "=" not in line
+        ):
+            continue
+
+        key, value = (
+            line.split("=", 1)
+        )
+
+        result[
+            key.strip()
+        ] = value.strip()
+
+    return result
+
+
+def hex_rgb(value):
+    value = value.lstrip("#")
+
+    return tuple(
+        int(
+            value[position:position + 2],
+            16,
+        )
+        for position
+        in (0, 2, 4)
+    )
+
+
+def rgb_hex(rgb):
+    return (
+        "#"
+        + "".join(
+            f"{max(0, min(255, round(v))):02x}"
+            for v in rgb
+        )
+    )
+
+
+def mix(a, b, amount):
+    left = hex_rgb(a)
+    right = hex_rgb(b)
+
+    return rgb_hex(
+        tuple(
+            x * (1 - amount)
+            + y * amount
+            for x, y
+            in zip(
+                left,
+                right,
+            )
+        )
+    )
+
+
+# ============================================================
+# Templates
+# ============================================================
+
+def render_template(
+    template,
+    output,
+    values,
+):
+    if not template.is_file():
+        return False
+
+    text = template.read_text(
+        encoding="utf-8"
+    )
+
+    for key, value in (
+        values.items()
+    ):
+        text = text.replace(
+            "{{"
+            + key
+            + "}}",
+            value,
+        )
+
+    if (
+        "{{" in text
+        or "}}" in text
+    ):
+        raise VNatureError(
+            f"в шаблоне "
+            f"{template.name} "
+            f"остались переменные"
+        )
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary = (
+        output.parent
+        / (
+            "."
+            + output.name
+            + ".tmp"
+        )
+    )
+
+    temporary.write_text(
+        text,
+        encoding="utf-8",
+    )
+
+    temporary.replace(
+        output
+    )
+
+    return True
+
+
+# ============================================================
+# Kitty modes
+# ============================================================
+
+STABLE = {
+    "color0": "#343835",
+    "color8": "#585a58",
+
+    "color1": "#ce3e60",
+    "color9": "#d18ea6",
+
+    "color2": "#7bb75b",
+    "color10": "#767e2b",
+
+    "color3": "#e8b32a",
+    "color11": "#77592e",
+
+    "color4": "#4c99d3",
+    "color12": "#135879",
+
+    "color5": "#a57fc4",
+    "color13": "#5f4190",
+
+    "color6": "#389aac",
+    "color14": "#76bbca",
+
+    "color7": "#f9faf6",
+    "color15": "#b1b5ae",
+}
+
+
+def kitty_colors(
+    palette,
+    mode,
+):
+    base_bg = "#1d1d1d"
+    base_fg = "#f7f6ec"
+
+    if mode == "accent":
+
+        result = {
+            "kitty_background":
+                base_bg,
+
+            "kitty_foreground":
+                base_fg,
+
+            "kitty_cursor":
+                palette["tertiary"],
+
+            "kitty_selection_bg":
+                palette[
+                    "primary_container"
+                ],
+
+            "kitty_selection_fg":
+                base_fg,
+
+            "kitty_active_tab_fg":
+                base_fg,
+
+            "kitty_active_tab_bg":
+                palette[
+                    "primary_container"
+                ],
+
+            "kitty_inactive_tab_fg":
+                "#b1b5ae",
+
+            "kitty_inactive_tab_bg":
+                "#171717",
+
+            "kitty_url":
+                palette["primary"],
+
+            "kitty_active_border":
+                palette[
+                    "primary_container"
+                ],
+        }
+
+        for key, value in (
+            STABLE.items()
+        ):
+            result[
+                "kitty_" + key
+            ] = value
+
+        return result
+
+    if mode == "balanced":
+
+        bg = mix(
+            base_bg,
+            palette["background"],
+            0.35,
+        )
+
+        fg = mix(
+            base_fg,
+            palette["foreground"],
+            0.30,
+        )
+
+        mappings = {
+            "color0": (
+                bg,
+                0.45,
+            ),
+
+            "color8": (
+                palette["outline"],
+                0.25,
+            ),
+
+            "color1": (
+                palette["error"],
+                0.35,
+            ),
+
+            "color9": (
+                palette["error"],
+                0.20,
+            ),
+
+            "color2": (
+                palette["tertiary"],
+                0.22,
+            ),
+
+            "color10": (
+                palette["tertiary"],
+                0.28,
+            ),
+
+            "color3": (
+                palette["tertiary"],
+                0.30,
+            ),
+
+            "color11": (
+                palette["tertiary"],
+                0.25,
+            ),
+
+            "color4": (
+                palette["secondary"],
+                0.20,
+            ),
+
+            "color12": (
+                palette["secondary"],
+                0.20,
+            ),
+
+            "color5": (
+                palette["primary"],
+                0.15,
+            ),
+
+            "color13": (
+                palette["primary"],
+                0.15,
+            ),
+
+            "color6": (
+                palette["secondary"],
+                0.30,
+            ),
+
+            "color14": (
+                palette["secondary"],
+                0.25,
+            ),
+
+            "color7": (
+                fg,
+                0.40,
+            ),
+
+            "color15": (
+                fg,
+                0.25,
+            ),
+        }
+
+        result = {
+            "kitty_background":
+                bg,
+
+            "kitty_foreground":
+                fg,
+
+            "kitty_cursor":
+                palette["tertiary"],
+
+            "kitty_selection_bg":
+                mix(
+                    bg,
+                    palette[
+                        "primary_container"
+                    ],
+                    0.75,
+                ),
+
+            "kitty_selection_fg":
+                fg,
+
+            "kitty_active_tab_fg":
+                fg,
+
+            "kitty_active_tab_bg":
+                mix(
+                    bg,
+                    palette[
+                        "primary_container"
+                    ],
+                    0.70,
+                ),
+
+            "kitty_inactive_tab_fg":
+                mix(
+                    "#b1b5ae",
+                    palette[
+                        "foreground_muted"
+                    ],
+                    0.25,
+                ),
+
+            "kitty_inactive_tab_bg":
+                mix(
+                    "#171717",
+                    palette[
+                        "surface_container_low"
+                    ],
+                    0.35,
+                ),
+
+            "kitty_url":
+                mix(
+                    "#389aac",
+                    palette[
+                        "secondary"
+                    ],
+                    0.35,
+                ),
+
+            "kitty_active_border":
+                palette[
+                    "primary_container"
+                ],
+        }
+
+        for key, (
+            target,
+            amount,
+        ) in mappings.items():
+
+            result[
+                "kitty_" + key
+            ] = mix(
+                STABLE[key],
+                target,
+                amount,
+            )
+
+        return result
+
+    # full
+
+    result = {
+        "kitty_background":
+            palette["background"],
+
+        "kitty_foreground":
+            palette["foreground"],
+
+        "kitty_cursor":
+            palette["primary"],
+
+        "kitty_selection_bg":
+            palette[
+                "primary_container"
+            ],
+
+        "kitty_selection_fg":
+            palette["foreground"],
+
+        "kitty_active_tab_fg":
+            palette["foreground"],
+
+        "kitty_active_tab_bg":
+            palette[
+                "primary_container"
+            ],
+
+        "kitty_inactive_tab_fg":
+            palette[
+                "foreground_muted"
+            ],
+
+        "kitty_inactive_tab_bg":
+            palette[
+                "surface_container_low"
+            ],
+
+        "kitty_url":
+            palette["secondary"],
+
+        "kitty_active_border":
+            palette["primary"],
+    }
+
+    targets = {
+        "color0":
+            palette["background"],
+
+        "color8":
+            palette["outline"],
+
+        "color1":
+            palette["error"],
+
+        "color9":
+            palette["error"],
+
+        "color2":
+            palette["tertiary"],
+
+        "color10":
+            palette["tertiary"],
+
+        "color3":
+            palette["tertiary"],
+
+        "color11":
+            palette["tertiary"],
+
+        "color4":
+            palette["secondary"],
+
+        "color12":
+            palette["secondary"],
+
+        "color5":
+            palette["primary"],
+
+        "color13":
+            palette["primary"],
+
+        "color6":
+            palette["secondary"],
+
+        "color14":
+            palette["secondary"],
+
+        "color7":
+            palette["foreground"],
+
+        "color15":
+            palette["foreground"],
+    }
+
+    for key, target in (
+        targets.items()
+    ):
+        result[
+            "kitty_" + key
+        ] = mix(
+            STABLE[key],
+            target,
+            0.70,
+        )
+
+    return result
+
+
+# ============================================================
+# Render applications
+# ============================================================
+
+def obsidian_vaults():
+    configs = [
+        Path.home()
+        / ".config"
+        / "obsidian"
+        / "obsidian.json",
+
+        Path.home()
+        / ".var"
+        / "app"
+        / "md.obsidian.Obsidian"
+        / "config"
+        / "obsidian"
+        / "obsidian.json",
+    ]
+
+    result = []
+    seen = set()
+
+    for config in configs:
+
+        if not config.is_file():
+            continue
+
+        try:
+            raw = json.loads(
+                config.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except Exception as error:
+            warn(
+                "не могу прочитать "
+                f"{config}: {error}"
+            )
+            continue
+
+        vaults = raw.get(
+            "vaults",
+            {}
+        )
+
+        if not isinstance(
+            vaults,
+            dict,
+        ):
+            continue
+
+        for entry in vaults.values():
+
+            if not isinstance(
+                entry,
+                dict,
+            ):
+                continue
+
+            raw_path = entry.get(
+                "path"
+            )
+
+            if not raw_path:
+                continue
+
+            vault = Path(
+                os.path.expandvars(
+                    os.path.expanduser(
+                        str(raw_path)
+                    )
+                )
+            ).resolve()
+
+            if not (
+                vault.is_dir()
+                and
+                (vault / ".obsidian").is_dir()
+            ):
+                continue
+
+            key = str(vault)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            result.append(
+                vault
+            )
+
+    return result
+
+
+def sync_obsidian_theme(
+    source,
+):
+    vaults = obsidian_vaults()
+
+    if not vaults:
+        warn(
+            "Obsidian vault не найден"
+        )
+        return
+
+    for vault in vaults:
+
+        snippets = (
+            vault
+            / ".obsidian"
+            / "snippets"
+        )
+
+        snippets.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        target = (
+            snippets
+            / "vnature.css"
+        )
+
+        backup = (
+            snippets
+            / "vnature.css.before-vnature"
+        )
+
+        if (
+            target.exists()
+            and not backup.exists()
+        ):
+            shutil.copy2(
+                target,
+                backup,
+            )
+
+        temporary = (
+            snippets
+            / ".vnature.css.tmp"
+        )
+
+        shutil.copy2(
+            source,
+            temporary,
+        )
+
+        temporary.replace(
+            target
+        )
+
+    info(
+        "Obsidian: обновлено vault'ов: "
+        + str(len(vaults))
+    )
+
+
+def render_apps(
+    palette_file,
+    kitty_mode,
+):
+    palette = read_palette(
+        palette_file
+    )
+
+    polybar_changed = (
+        render_template(
+            TEMPLATES
+            / "polybar.ini",
+
+            POLYBAR_GENERATED,
+
+            palette,
+        )
+    )
+
+    render_template(
+        TEMPLATES
+        / "rofi.rasi",
+
+        ROFI_GENERATED,
+
+        palette,
+    )
+
+    hypr = dict(
+        palette
+    )
+
+    hypr["hypr_primary"] = (
+        palette["primary"]
+        .lstrip("#")
+    )
+
+    hypr["hypr_secondary"] = (
+        palette["secondary"]
+        .lstrip("#")
+    )
+
+    hypr["hypr_outline"] = (
+        palette["outline"]
+        .lstrip("#")
+    )
+
+    render_template(
+        TEMPLATES
+        / "hyprland.lua",
+
+        HYPRLAND_THEME,
+
+        hypr,
+    )
+
+    render_template(
+        TEMPLATES
+        / "swaync.css",
+
+        SWAYNC_THEME,
+
+        palette,
+    )
+
+    render_template(
+        TEMPLATES
+        / "waybar.css",
+
+        WAYBAR_THEME,
+
+        palette,
+    )
+
+    if render_template(
+        TEMPLATES
+        / "obsidian.css",
+
+        OBSIDIAN_GENERATED,
+
+        palette,
+    ):
+        sync_obsidian_theme(
+            OBSIDIAN_GENERATED
+        )
+
+    kitty = dict(
+        palette
+    )
+
+    kitty.update(
+        kitty_colors(
+            palette,
+            kitty_mode,
+        )
+    )
+
+    kitty_changed = (
+        render_template(
+            TEMPLATES
+            / "kitty.conf",
+
+            KITTY_THEME,
+
+            kitty,
+        )
+    )
+
+    return (
+        polybar_changed,
+        kitty_changed,
+    )
+
+
+def reload_polybar():
+    if (
+        os.environ.get(
+            "XDG_SESSION_TYPE"
+        ) != "x11"
+    ):
+        return
+
+    if not POLYBAR_LAUNCH.is_file():
+        return
+
+    subprocess.run(
+        [
+            "bash",
+            str(POLYBAR_LAUNCH),
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def reload_hyprland():
+    if not os.environ.get(
+        "HYPRLAND_INSTANCE_SIGNATURE"
+    ):
+        return
+
+    if shutil.which("hyprctl") is None:
+        return
+
+    subprocess.run(
+        [
+            "hyprctl",
+            "reload",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def reload_swaync():
+    if shutil.which(
+        "swaync-client"
+    ) is None:
+        return
+
+    subprocess.run(
+        [
+            "swaync-client",
+            "--reload-css",
+            "--skip-wait",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def reload_kitty():
+    if shutil.which(
+        "kitten"
+    ) is None:
+        return
+
+    subprocess.run(
+        [
+            "kitten",
+            "themes",
+            "--reload-in=all",
+            "VNature",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+# ============================================================
+# Applying
+# ============================================================
+
+def build_stage(
+    palette,
+    *,
+    name,
+    wallpaper,
+    kitty_mode,
+):
+    stage = Path(
+        tempfile.mkdtemp(
+            prefix="stage-",
+            dir=CACHE,
+        )
+    )
+
+    shutil.copy2(
+        palette,
+        stage / "palette.conf",
+    )
+
+    write_state(
+        stage,
+        name=name,
+        wallpaper=wallpaper,
+        kitty_mode=kitty_mode,
+    )
+
+    return stage
+
+
+def commit_stage(stage):
+    palette = (
+        stage
+        / "palette.conf"
+    )
+
+    state = read_state(
+        stage
+    )
+
+    wallpaper = (
+        Path(state["wallpaper"])
+        if state.get("wallpaper")
+        else None
+    )
+
+    if (
+        wallpaper
+        and not wallpaper.is_file()
+    ):
+        raise VNatureError(
+            f"обои исчезли: "
+            f"{wallpaper}"
+        )
+
+    (
+        polybar_changed,
+        kitty_changed,
+    ) = render_apps(
+        palette,
+        state["kitty_mode"],
+    )
+
+    if wallpaper:
+        set_wallpaper(
+            wallpaper
+        )
+
+    remember_current()
+
+    if CURRENT.exists():
+        shutil.rmtree(
+            CURRENT
+        )
+
+    shutil.move(
+        str(stage),
+        str(CURRENT),
+    )
+
+    if polybar_changed:
+        reload_polybar()
+
+    if kitty_changed:
+        reload_kitty()
+
+    reload_hyprland()
+    reload_swaync()
+
+
+def apply_preset(
+    name,
+    cfg,
+    *,
+    with_wallpaper=False,
+):
+    preset = load_preset(
+        name
+    )
+
+    palette = (
+        preset_path(name)
+        / "palette.conf"
+    )
+
+    wallpaper = (
+        current_wallpaper()
+    )
+
+    if with_wallpaper:
+
+        reference = preset.get(
+            "wallpaper"
+        )
+
+        if not reference:
+            info(
+                f"у {name} нет "
+                f"привязанных обоев"
+            )
+
+        else:
+            candidate = (
+                resolve_wallpaper(
+                    reference,
+                    cfg,
+                )
+            )
+
+            if candidate.is_file():
+                wallpaper = candidate
+
+            else:
+                warn(
+                    "привязанные обои "
+                    "не найдены: "
+                    + str(candidate)
+                )
+
+    kitty_mode = (
+        effective_kitty_mode(
+            preset,
+            cfg,
+        )
+    )
+
+    stage = build_stage(
+        palette,
+
+        name=name,
+
+        wallpaper=wallpaper,
+
+        kitty_mode=kitty_mode,
+    )
+
+    commit_stage(
+        stage
+    )
+
+    info(
+        f"применён пресет: "
+        f"{name}"
+    )
+
+
+# ============================================================
+# Matugen
+# ============================================================
+
+def prepare_matugen():
+    require("matugen")
+
+    palette_template = (
+        TEMPLATES
+        / "palette.conf"
+    )
+
+    MATUGEN_CONFIG.write_text(
+        "[config.wallpaper]\n"
+        'command = "feh"\n'
+        'arguments = ["--bg-fill"]\n'
+        "set = false\n\n"
+        "[templates.palette]\n"
+        "input_path = "
+        + toml_string(
+            palette_template
+        )
+        + "\n"
+        "output_path = "
+        + toml_string(
+            MATUGEN_PALETTE
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def generate_palette(
+    image,
+    cfg,
+    poh=False,
+):
+    prepare_matugen()
+
+    MATUGEN_PALETTE.unlink(
+        missing_ok=True
+    )
+
+    command = [
+        "matugen",
+        "-c",
+        str(MATUGEN_CONFIG),
+
+        "image",
+        str(image),
+
+        "-m",
+        cfg["mode"],
+    ]
+
+    if poh:
+        command += [
+            "--source-color-index",
+            "0",
+        ]
+
+    subprocess.run(
+        command,
+        check=True,
+    )
+
+    if not MATUGEN_PALETTE.is_file():
+        raise VNatureError(
+            "Matugen не создал palette"
+        )
+
+    return MATUGEN_PALETTE
+
+
+def apply_image(
+    image_argument,
+    cfg,
+    *,
+    poh=False,
+):
+    image = Path(
+        os.path.expandvars(
+            os.path.expanduser(
+                image_argument
+            )
+        )
+    ).resolve()
+
+    if not image.is_file():
+        raise VNatureError(
+            f"нет картинки: {image}"
+        )
+
+    palette = generate_palette(
+        image,
+        cfg,
+        poh,
+    )
+
+    stage = build_stage(
+        palette,
+
+        name="__temporary__",
+
+        wallpaper=image,
+
+        kitty_mode=cfg[
+            "kitty_mode"
+        ],
+    )
+
+    commit_stage(
+        stage
+    )
+
+    info(
+        f"поставил: {image.name}"
+    )
+
+    print()
+    print(
+        "Чётко:"
+    )
+    print(
+        "  vnature chotko NAME"
+    )
+    print(
+        "  vnature chotko NAME --eblo"
+    )
+
+    print(
+        "Говно:"
+    )
+    print(
+        "  vnature govno"
+    )
+
+
+# ============================================================
+# Save/delete
+# ============================================================
+
+def save_current(
+    name,
+    cfg,
+    *,
+    with_wallpaper=False,
+    kitty_mode=None,
+):
+    if not name:
+        raise VNatureError(
+            "нужно имя"
+        )
+
+    palette = (
+        CURRENT
+        / "palette.conf"
+    )
+
+    if not palette.is_file():
+        raise VNatureError(
+            "текущей темы нет"
+        )
+
+    directory = (
+        preset_path(name)
+    )
+
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    shutil.copy2(
+        palette,
+        directory
+        / "palette.conf",
+    )
+
+    try:
+        old = load_preset(
+            name
+        )
+    except VNatureError:
+        old = {
+            "wallpaper": None,
+            "kitty_mode": "inherit",
+        }
+
+    wallpaper_ref = old.get(
+        "wallpaper"
+    )
+
+    if with_wallpaper:
+
+        wallpaper = (
+            current_wallpaper()
+        )
+
+        if not wallpaper:
+            raise VNatureError(
+                "не знаю текущие обои"
+            )
+
+        wallpaper_ref = (
+            portable_wallpaper(
+                wallpaper,
+                cfg,
+            )
+        )
+
+    selected_mode = (
+        kitty_mode
+        if kitty_mode is not None
+        else old.get(
+            "kitty_mode",
+            "inherit",
+        )
+    )
+
+    save_preset_meta(
+        name,
+
+        wallpaper=wallpaper_ref,
+
+        kitty_mode=selected_mode,
+    )
+
+    info(
+        f"чётко. сохранено: "
+        f"{name}"
+    )
+
+
+def delete_preset(name):
+    if not preset_exists(name):
+        raise VNatureError(
+            f"такого пресета нет: "
+            f"{name}"
+        )
+
+    answer = input(
+        f'Удалить "{name}"? [y/N]: '
+    ).strip().lower()
+
+    if answer not in (
+        "y",
+        "yes",
+        "д",
+        "да",
+    ):
+        info("не трогаю")
+        return
+
+    shutil.rmtree(
+        preset_path(name)
+    )
+
+    info(
+        f"нахуй: {name}"
+    )
+
+
+# ============================================================
+# Undo
+# ============================================================
+
+def go_back():
+    if not PREVIOUS.exists():
+        raise VNatureError(
+            "предыдущего говна нет"
+        )
+
+    state = read_state(
+        PREVIOUS
+    )
+
+    palette = (
+        PREVIOUS
+        / "palette.conf"
+    )
+
+    wallpaper = (
+        Path(state["wallpaper"])
+        if state.get("wallpaper")
+        else None
+    )
+
+    (
+        polybar_changed,
+        kitty_changed,
+    ) = render_apps(
+        palette,
+        state["kitty_mode"],
+    )
+
+    if (
+        wallpaper
+        and wallpaper.is_file()
+    ):
+        set_wallpaper(
+            wallpaper
+        )
+
+    swap = (
+        STATE_DIR
+        / ".swap"
+    )
+
+    if swap.exists():
+        shutil.rmtree(
+            swap
+        )
+
+    if CURRENT.exists():
+        CURRENT.rename(
+            swap
+        )
+
+    PREVIOUS.rename(
+        CURRENT
+    )
+
+    if swap.exists():
+        swap.rename(
+            PREVIOUS
+        )
+
+    if polybar_changed:
+        reload_polybar()
+
+    if kitty_changed:
+        reload_kitty()
+
+    reload_hyprland()
+    reload_swaync()
+
+    info(
+        "вернул предыдущее говно"
+    )
+
+
+# ============================================================
+# Info
+# ============================================================
+
+def show_current():
+    state = read_state(
+        CURRENT
+    )
+
+    if not state:
+        print(
+            "Ничего не отслеживается."
+        )
+        return
+
+    print(
+        "Тема:",
+        state["name"],
+    )
+
+    print(
+        "Kitty:",
+        state["kitty_mode"],
+    )
+
+    if state.get(
+        "wallpaper"
+    ):
+        print(
+            "Обои:",
+            state["wallpaper"],
+        )
+
+
+def show_presets():
+    for name in get_presets():
+
+        preset = load_preset(
+            name
+        )
+
+        eblo = (
+            "eblo"
+            if preset.get(
+                "wallpaper"
+            )
+            else "-"
+        )
+
+        print(
+            f"{name:20} "
+            f"[{eblo:4}] "
+            f"kitty="
+            f"{preset['kitty_mode']}"
+        )
+
+
+# ============================================================
+# TUI
+# ============================================================
+
+def menu(
+    title,
+    items,
+):
+    def run(stdscr):
+
+        curses.curs_set(0)
+
+        index = 0
+
+        while True:
+
+            stdscr.erase()
+
+            stdscr.addstr(
+                1,
+                2,
+                title,
+                curses.A_BOLD,
+            )
+
+            for position, item in (
+                enumerate(items)
+            ):
+
+                marker = (
+                    "❯ "
+                    if position == index
+                    else "  "
+                )
+
+                attribute = (
+                    curses.A_REVERSE
+                    if position == index
+                    else curses.A_NORMAL
+                )
+
+                stdscr.addstr(
+                    3 + position,
+                    2,
+                    marker + item,
+                    attribute,
+                )
+
+            stdscr.addstr(
+                5 + len(items),
+                2,
+                "↑/↓ j/k · "
+                "Enter · q/Esc",
+                curses.A_DIM,
+            )
+
+            key = stdscr.getch()
+
+            if key in (
+                curses.KEY_UP,
+                ord("k"),
+            ):
+                index = (
+                    index - 1
+                ) % len(items)
+
+            elif key in (
+                curses.KEY_DOWN,
+                ord("j"),
+            ):
+                index = (
+                    index + 1
+                ) % len(items)
+
+            elif key in (
+                10,
+                13,
+            ):
+                return index
+
+            elif key in (
+                27,
+                ord("q"),
+            ):
+                return None
+
+    return curses.wrapper(
+        run
+    )
+
+
+def pause():
+    input(
+        "\nEnter — дальше..."
+    )
+
+
+def pick_kitty_mode(
+    inherit=True,
+):
+    modes = []
+
+    if inherit:
+        modes.append(
+            (
+                "Наследовать глобальный",
+                "inherit",
+            )
+        )
+
+    modes += [
+        (
+            "Accent — минимум изменений",
+            "accent",
+        ),
+        (
+            "Balanced — адаптивно",
+            "balanced",
+        ),
+        (
+            "Full — ебашим",
+            "full",
+        ),
+    ]
+
+    index = menu(
+        "Режим Kitty",
+        [
+            label
+            for label, _
+            in modes
+        ],
+    )
+
+    if index is None:
+        return None
+
+    return modes[index][1]
+
+
+def interactive_apply(cfg):
+    presets = get_presets()
+
+    index = menu(
+        "Какую тему?",
+        presets,
+    )
+
+    if index is None:
+        return
+
+    name = presets[index]
+
+    mode = menu(
+        name,
+        [
+            "Только тема",
+            "Тема + обои (--eblo)",
+        ],
+    )
+
+    if mode is None:
+        return
+
+    apply_preset(
+        name,
+        cfg,
+        with_wallpaper=(
+            mode == 1
+        ),
+    )
+
+    pause()
+
+
+def interactive_save(cfg):
+    name = input(
+        "Имя пресета: "
+    ).strip()
+
+    if not name:
+        return
+
+    eblo = menu(
+        "Привязать текущие обои?",
+        [
+            "Нет",
+            "Да",
+        ],
+    )
+
+    if eblo is None:
+        return
+
+    kitty_mode = (
+        pick_kitty_mode(
+            inherit=True,
+        )
+    )
+
+    if kitty_mode is None:
+        return
+
+    save_current(
+        name,
+        cfg,
+        with_wallpaper=(
+            eblo == 1
+        ),
+        kitty_mode=kitty_mode,
+    )
+
+    pause()
+
+
+def interactive_settings(cfg):
+
+    selected = (
+        pick_kitty_mode(
+            inherit=False,
+        )
+    )
+
+    if not selected:
+        return
+
+    cfg[
+        "kitty_mode"
+    ] = selected
+
+    save_config(
+        cfg
+    )
+
+    info(
+        f"Kitty default: "
+        f"{selected}"
+    )
+
+    print(
+        "Применится при следующем "
+        "переключении темы."
+    )
+
+    pause()
+
+
+def interactive_manage(cfg):
+
+    presets = get_presets()
+
+    selected = menu(
+        "Управление пресетами",
+        presets,
+    )
+
+    if selected is None:
+        return
+
+    name = presets[selected]
+
+    action = menu(
+        name,
+        [
+            "Режим Kitty",
+            "Привязать текущие обои",
+            "Убрать привязанные обои",
+            "Удалить нахуй",
+        ],
+    )
+
+    if action is None:
+        return
+
+    preset = load_preset(
+        name
+    )
+
+    if action == 0:
+
+        mode = (
+            pick_kitty_mode(
+                inherit=True,
+            )
+        )
+
+        if mode:
+            save_preset_meta(
+                name,
+
+                wallpaper=preset.get(
+                    "wallpaper"
+                ),
+
+                kitty_mode=mode,
+            )
+
+    elif action == 1:
+
+        wallpaper = (
+            current_wallpaper()
+        )
+
+        if wallpaper:
+            save_preset_meta(
+                name,
+
+                wallpaper=portable_wallpaper(
+                    wallpaper,
+                    cfg,
+                ),
+
+                kitty_mode=preset[
+                    "kitty_mode"
+                ],
+            )
+
+    elif action == 2:
+
+        save_preset_meta(
+            name,
+
+            wallpaper=None,
+
+            kitty_mode=preset[
+                "kitty_mode"
+            ],
+        )
+
+    elif action == 3:
+
+        confirmation = menu(
+            "Точно?",
+            [
+                "Нет",
+                "Да, нахуй",
+            ],
+        )
+
+        if confirmation == 1:
+            shutil.rmtree(
+                preset_path(name)
+            )
+
+    pause()
+
+
+def interactive_wallpaper(cfg):
+
+    images = sorted(
+        [
+            path
+            for path in (
+                cfg[
+                    "wallpaper_dir"
+                ].iterdir()
+            )
+            if (
+                path.is_file()
+                and
+                path.suffix.lower()
+                in IMAGE_EXTENSIONS
+            )
+        ]
+    )
+
+    index = menu(
+        "Выбирай обои",
+        [
+            image.name
+            for image in images
+        ],
+    )
+
+    if index is None:
+        return
+
+    image = images[index]
+
+    mode = menu(
+        image.name,
+        [
+            "Выбрать source color",
+            "Мне пох — бери первый",
+        ],
+    )
+
+    if mode is None:
+        return
+
+    apply_image(
+        str(image),
+        cfg,
+        poh=(
+            mode == 1
+        ),
+    )
+
+    pause()
+
+
+def interactive(cfg):
+
+    while True:
+
+        action = menu(
+            "VNature",
+            [
+                "Выбрать обои",
+                "Применить тему",
+                "Чётко — сохранить",
+                "Говно — назад",
+                "Управление пресетами",
+                "Настройки Kitty",
+                "Что сейчас",
+                "Выйти",
+            ],
+        )
+
+        if action is None:
+            return
+
+        if action == 0:
+            interactive_wallpaper(
+                cfg
+            )
+
+        elif action == 1:
+            interactive_apply(
+                cfg
+            )
+
+        elif action == 2:
+            interactive_save(
+                cfg
+            )
+
+        elif action == 3:
+            go_back()
+            pause()
+
+        elif action == 4:
+            interactive_manage(
+                cfg
+            )
+
+        elif action == 5:
+            interactive_settings(
+                cfg
+            )
+
+        elif action == 6:
+            show_current()
+            pause()
+
+        elif action == 7:
+            return
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def main():
+
+    ensure_dirs()
+
+    cfg = load_config()
+
+    args = sys.argv[1:]
+
+    if not args:
+        interactive(
+            cfg
+        )
+        return
+
+    command = args[0]
+
+    if command == "kto":
+        show_presets()
+        return
+
+    if command == "cho":
+        show_current()
+        return
+
+    if command == "govno":
+        go_back()
+        return
+
+    if command == "nahui":
+
+        if len(args) != 2:
+            raise VNatureError(
+                "vnature nahui NAME"
+            )
+
+        delete_preset(
+            args[1]
+        )
+
+        return
+
+    if command == "chotko":
+
+        if len(args) not in (
+            2,
+            3,
+        ):
+            raise VNatureError(
+                "vnature chotko NAME "
+                "[--eblo]"
+            )
+
+        save_current(
+            args[1],
+            cfg,
+            with_wallpaper=(
+                "--eblo"
+                in args[2:]
+            ),
+        )
+
+        return
+
+    if command == "--poh":
+
+        if len(args) != 2:
+            raise VNatureError(
+                "vnature --poh IMAGE"
+            )
+
+        apply_image(
+            args[1],
+            cfg,
+            poh=True,
+        )
+
+        return
+
+    if command == "--eblo":
+
+        if len(args) != 2:
+            raise VNatureError(
+                "vnature --eblo PRESET"
+            )
+
+        apply_preset(
+            args[1],
+            cfg,
+            with_wallpaper=True,
+        )
+
+        return
+
+    if preset_exists(
+        command
+    ):
+
+        apply_preset(
+            command,
+            cfg,
+        )
+
+        return
+
+    image = Path(
+        os.path.expanduser(
+            command
+        )
+    )
+
+    if image.is_file():
+
+        apply_image(
+            command,
+            cfg,
+        )
+
+        return
+
+    raise VNatureError(
+        f"не понял: {command}"
+    )
+
+
+if __name__ == "__main__":
+
+    try:
+        main()
+
+    except VNatureError as error:
+
+        print(
+            f"vnature: {error}",
+            file=sys.stderr,
+        )
+
+        sys.exit(1)
+
+    except subprocess.CalledProcessError as error:
+
+        print(
+            "vnature: команда упала "
+            f"с кодом "
+            f"{error.returncode}",
+            file=sys.stderr,
+        )
+
+        sys.exit(
+            error.returncode
+            or 1
+        )
