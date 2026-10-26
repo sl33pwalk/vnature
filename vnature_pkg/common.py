@@ -19,10 +19,21 @@ VERSION = "0.4.0"
 # state и пресеты не меняются, перезагрузок нет.
 DRY_RUN = False
 
-# Клон проекта: presets/ лежат рядом с исполняемым vnature, шаблоны - внутри пакета.
+# Клон проекта (рядом с исполняемым vnature); шаблоны - внутри пакета.
 ROOT = Path(__file__).resolve().parent.parent
 
-PRESETS = ROOT / "presets"
+# Пресеты пользователя: $XDG_DATA_HOME/vnature/presets, по умолчанию ~/.local/share.
+# Относительный XDG_DATA_HOME по спецификации игнорируется.
+DATA_DIR = (
+    Path(os.environ["XDG_DATA_HOME"])
+    if os.path.isabs(os.environ.get("XDG_DATA_HOME", ""))
+    else Path.home() / ".local/share"
+) / "vnature"
+
+PRESETS = DATA_DIR / "presets"
+
+# Старое место: presets/ в клоне. Отсюда только предлагаем перенос (vnature migrate).
+LEGACY_PRESETS = ROOT / "presets"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 
 CONFIG_DIR = Path.home() / ".config/vnature"

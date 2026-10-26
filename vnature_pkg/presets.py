@@ -7,6 +7,7 @@ import tomllib
 
 from .common import (
     DRY_RUN,
+    LEGACY_PRESETS,
     PRESETS,
     VNatureError,
     info,
@@ -53,13 +54,15 @@ def preset_exists(name):
     )
 
 
-def get_presets():
-    if not PRESETS.exists():
+def get_presets(root=None):
+    root = root or PRESETS
+
+    if not root.exists():
         return []
 
     return sorted(
         directory.name
-        for directory in PRESETS.iterdir()
+        for directory in root.iterdir()
         if (
             directory.is_dir()
             and valid_preset_name(directory.name)
@@ -186,3 +189,49 @@ def save_preset_meta(
         "\n".join(lines) + "\n",
         encoding="utf-8",
     )
+
+
+def legacy_presets():
+    # Пресеты в старом месте, если в новом пусто: тогда предлагаем перенос.
+    if LEGACY_PRESETS.resolve() == PRESETS.resolve() or get_presets():
+        return []
+
+    return get_presets(LEGACY_PRESETS)
+
+
+def migrate_presets():
+    # Копия из старого места; старые не трогаем, существующие не перезаписываем.
+    names = get_presets(LEGACY_PRESETS)
+
+    if not names:
+        raise VNatureError(
+            f"в старом месте пресетов нет: {LEGACY_PRESETS}"
+        )
+
+    for name in names:
+        target = PRESETS / name
+
+        if target.exists() or target.is_symlink():
+            info(f"уже есть, пропускаю: {name}")
+            continue
+
+        if DRY_RUN:
+            info(f"dry-run: скопировал бы {LEGACY_PRESETS / name} -> {target}")
+            continue
+
+        # Сначала во временную папку (точка - get_presets её не видит), потом rename:
+        # оборванное копирование не оставит полупресет.
+        partial = PRESETS / f".{name}.part"
+        shutil.rmtree(partial, ignore_errors=True)
+
+        try:
+            shutil.copytree(LEGACY_PRESETS / name, partial, symlinks=True)
+            partial.rename(target)
+        except BaseException:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+
+        info(f"перенёс: {name}")
+
+    if not DRY_RUN:
+        info(f"старые пресеты остались в {LEGACY_PRESETS} - удалишь сам, когда убедишься")

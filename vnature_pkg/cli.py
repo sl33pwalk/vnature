@@ -9,16 +9,21 @@ import sys
 
 from .common import (
     VERSION,
+    LEGACY_PRESETS,
+    PRESETS,
     VNatureError,
     expand,
     ensure_dirs,
     set_global,
+    warn,
 )
 from .config import (
     load_config,
 )
 from .presets import (
     preset_exists,
+    legacy_presets,
+    migrate_presets,
 )
 from .commands import (
     apply_preset,
@@ -47,6 +52,7 @@ COMMANDS = {
     "list": (["kto"], "список пресетов"),
     "status": (["cho"], "что применено сейчас"),
     "delete": (["nahui"], "удалить пресет"),
+    "migrate": ([], "скопировать пресеты из старого места (presets/ в клоне)"),
 }
 
 WALLPAPER_FLAGS = (
@@ -263,6 +269,8 @@ def build_parser():
     command = add("delete")
     command.add_argument("name", metavar="NAME")
 
+    add("migrate")
+
     return parser
 
 
@@ -318,6 +326,14 @@ def main(argv=None):
                 f"нет папки обоев: {cfg['wallpaper_dir']}"
             )
 
+    # В TUI об этом спросит диалог.
+    if args.command not in (None, "migrate") and legacy_presets():
+        warn(
+            f"пресеты лежат в старом месте: {LEGACY_PRESETS}\n"
+            f"  новое место: {PRESETS}\n"
+            "  перенести (копией, старые останутся): vnature migrate"
+        )
+
     if args.command is None:
         interactive(cfg)
 
@@ -355,6 +371,9 @@ def main(argv=None):
         delete_preset(
             args.name
         )
+
+    elif args.command == "migrate":
+        migrate_presets()
 
 
 def run():

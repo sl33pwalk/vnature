@@ -14,6 +14,13 @@ SCRIPT = Path(__file__).resolve().parent.parent / "vnature"
 sys.path.insert(0, str(SCRIPT.parent))
 
 
+def load_vnature():
+    # Свежий импорт: пути от HOME/XDG_DATA_HOME считаются при загрузке модулей.
+    for name in [name for name in sys.modules if name.split(".")[0] == "vnature_pkg"]:
+        del sys.modules[name]
+    return importlib.import_module("vnature_pkg")
+
+
 class Isolated(unittest.TestCase):
     """Каждый тест грузит vnature заново с временным HOME и presets/."""
 
@@ -23,12 +30,11 @@ class Isolated(unittest.TestCase):
         self.old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
 
-        for name in [name for name in sys.modules if name.split(".")[0] == "vnature_pkg"]:
-            del sys.modules[name]
-        self.v = importlib.import_module("vnature_pkg")
+        self.v = load_vnature()
 
         self.v.PRESETS = self.home / "presets"
         self.v.PRESETS.mkdir()
+        self.v.LEGACY_PRESETS = self.home / "old-presets"
         self.v.ensure_dirs()
 
         # Никаких сигналов настоящему kitty и вызовов hyprctl/swaync из тестов.
@@ -953,6 +959,97 @@ class RussianArgparse(Isolated):
                 self.assertNotIn("usage:", text)
         self.assertIn("показать версию", self.run_cli("--help")[1])
         self.assertIn("undo (govno)", self.run_cli("--help")[1])
+
+
+class PresetsLocation(Isolated):
+
+    def make(self, root, name, text="primary=#336699\n"):
+        (root / name).mkdir(parents=True)
+        (root / name / "palette.conf").write_text(text)
+
+    def test_xdg_data_home(self):
+        cases = (
+            ({}, self.home / ".local/share/vnature/presets"),
+            ({"XDG_DATA_HOME": str(self.home / "data")}, self.home / "data/vnature/presets"),
+            ({"XDG_DATA_HOME": "relative/data"}, self.home / ".local/share/vnature/presets"),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env), unittest.mock.patch.dict(
+                    os.environ, {"HOME": str(self.home), **env}, clear=True):
+                self.assertEqual(load_vnature().PRESETS, expected)
+        self.assertEqual(self.v.LEGACY_PRESETS.name, "old-presets")
+        self.assertEqual(load_vnature().LEGACY_PRESETS, SCRIPT.parent / "presets")
+
+    def test_offer_only_when_new_place_is_empty(self):
+        self.assertEqual(self.v.legacy_presets(), [])
+        self.make(self.v.LEGACY_PRESETS, "autumn")
+        self.make(self.v.LEGACY_PRESETS, "cosmos")
+        (self.v.LEGACY_PRESETS / "not-a-preset").mkdir()
+        self.assertEqual(self.v.legacy_presets(), ["autumn", "cosmos"])
+
+        self.make(self.v.PRESETS, "mine")
+        self.assertEqual(self.v.legacy_presets(), [])
+
+    def test_migrate_copies_keeps_old_and_never_overwrites(self):
+        self.make(self.v.LEGACY_PRESETS, "autumn", "primary=#111111\n")
+        self.make(self.v.LEGACY_PRESETS, "cosmos", "primary=#222222\n")
+        (self.v.LEGACY_PRESETS / "autumn/preset.toml").write_text('wallpaper = "a.jpg"\n')
+        self.make(self.v.PRESETS, "cosmos", "primary=#999999\n")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.v.migrate_presets()
+
+        self.assertEqual((self.v.PRESETS / "autumn/palette.conf").read_text(), "primary=#111111\n")
+        self.assertEqual((self.v.PRESETS / "autumn/preset.toml").read_text(), 'wallpaper = "a.jpg"\n')
+        self.assertEqual((self.v.PRESETS / "cosmos/palette.conf").read_text(), "primary=#999999\n")
+        self.assertTrue((self.v.LEGACY_PRESETS / "autumn/palette.conf").is_file())
+        self.assertTrue((self.v.LEGACY_PRESETS / "cosmos/palette.conf").is_file())
+        self.assertIn("уже есть, пропускаю: cosmos", out.getvalue())
+        self.assertEqual(self.v.get_presets(), ["autumn", "cosmos"])
+
+    def test_migrate_dry_run_and_empty(self):
+        with self.assertRaises(self.v.VNatureError):
+            self.v.migrate_presets()
+
+        self.make(self.v.LEGACY_PRESETS, "autumn")
+        self.v.DRY_RUN = True
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.v.migrate_presets()
+        self.assertIn("dry-run: скопировал бы", out.getvalue())
+        self.assertEqual(list(self.v.PRESETS.iterdir()), [])
+
+    def test_failed_copy_leaves_no_half_preset(self):
+        self.make(self.v.LEGACY_PRESETS, "autumn")
+        real = self.v.shutil.copytree
+
+        def broken(src, dst, **kwargs):
+            real(src, dst, **kwargs)
+            raise OSError("диск кончился")
+
+        with unittest.mock.patch.object(self.v.shutil, "copytree", broken), \
+                self.assertRaises(OSError):
+            self.v.migrate_presets()
+
+        self.assertEqual(list(self.v.PRESETS.iterdir()), [])
+        self.assertTrue((self.v.LEGACY_PRESETS / "autumn/palette.conf").is_file())
+
+    def test_cli_suggests_and_only_migrate_copies(self):
+        self.make(self.v.LEGACY_PRESETS, "autumn")
+
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.v.main(["list"])
+        self.assertIn("vnature migrate", err.getvalue())
+        self.assertEqual(list(self.v.PRESETS.iterdir()), [])
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.v.main(["migrate"])
+        self.assertEqual(self.v.get_presets(), ["autumn"])
+
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.v.main(["list"])
+        self.assertNotIn("migrate", err.getvalue())
 
 
 if __name__ == "__main__":

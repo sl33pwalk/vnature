@@ -18,6 +18,8 @@ from .common import (
     DRY_RUN,
     CONFIG_FILE,
     CURRENT,
+    LEGACY_PRESETS,
+    PRESETS,
     VNatureError,
     info,
     warn,
@@ -44,6 +46,8 @@ from .presets import (
     remove_preset,
     load_preset,
     save_preset_meta,
+    legacy_presets,
+    migrate_presets,
 )
 from .wallpaper import (
     wallpaper_images,
@@ -926,6 +930,20 @@ class TUI:
 
         self.act(change)
 
+    def offer_migration(self):
+        names = legacy_presets()
+
+        if not names:
+            return
+
+        choice = self.menu(
+            f"Пресеты в старом месте: {tilde(LEGACY_PRESETS)} ({len(names)})",
+            [f"Перенести в {tilde(PRESETS)} (копией, старые останутся)", "Не сейчас"],
+        )
+
+        if choice == 0:
+            self.act(migrate_presets)
+
     def wallpaper_dir(self):
         raw = self.ask(
             f"Папка обоев: {self.cfg['wallpaper_dir']}\n"
@@ -1526,6 +1544,8 @@ class TUI:
         set_global("SINK", self.message)
 
         try:
+            self.offer_migration()
+
             while True:
                 context = TABS[self.tab]
                 result = self.kitty_slider() if context == "Kitty" else self.browse(context)
