@@ -1,5 +1,7 @@
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -118,6 +120,92 @@ class Rendering(Isolated):
 
         self.assertFalse(stage.exists())
         self.assertFalse(self.v.CURRENT.exists())
+
+
+class ArgParsing(Isolated):
+
+    def setUp(self):
+        super().setUp()
+        (self.v.PRESETS / "autumn").mkdir()
+        (self.v.PRESETS / "autumn" / "palette.conf").write_text("x=1\n")
+        self.image = self.home / "w.jpg"
+        self.image.write_bytes(b"")
+
+    def parse(self, line):
+        return self.v.parse_args(line.split())
+
+    def assert_exit_2(self, line):
+        with self.assertRaises(SystemExit) as caught, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.parse(line)
+        self.assertEqual(caught.exception.code, 2, line)
+
+    def test_eblo_any_position_and_legacy_forms(self):
+        for line in (
+            "apply autumn --eblo",
+            "apply --eblo autumn",
+            "--eblo apply autumn",
+            "apply autumn --wallpaper",
+            "--eblo autumn",
+            "autumn --eblo",
+        ):
+            with self.subTest(line=line):
+                args = self.parse(line)
+                self.assertEqual((args.command, args.preset, args.eblo),
+                                 ("apply", "autumn", True))
+
+        args = self.parse("autumn")
+        self.assertEqual((args.command, args.preset, args.eblo), ("apply", "autumn", False))
+
+    def test_aliases(self):
+        self.assertEqual(self.parse("kto").command, "list")
+        self.assertEqual(self.parse("cho").command, "status")
+        self.assertEqual(self.parse("govno").command, "undo")
+        args = self.parse("nahui autumn")
+        self.assertEqual((args.command, args.name), ("delete", "autumn"))
+        args = self.parse("chotko new --eblo")
+        self.assertEqual((args.command, args.name, args.eblo), ("save", "new", True))
+        args = self.parse("save new")
+        self.assertEqual((args.command, args.name, args.eblo), ("save", "new", False))
+        self.assertIsNone(self.parse("").command)
+
+    def test_image_forms(self):
+        for line, first in (
+            (f"--poh {self.image}", True),
+            (f"{self.image} --poh", True),
+            (f"image {self.image} --first-color", True),
+            (f"{self.image}", False),
+            ("$HOME/w.jpg", False),
+            ("~/w.jpg", False),
+        ):
+            with self.subTest(line=line):
+                args = self.parse(line)
+                self.assertEqual((args.command, args.first_color), ("image", first))
+
+    def test_global_flags_any_position(self):
+        for line in ("--dry-run apply autumn", "apply autumn --dry-run", "autumn --dry-run"):
+            with self.subTest(line=line):
+                self.assertTrue(self.parse(line).dry_run)
+        self.assertFalse(self.parse("apply autumn").dry_run)
+
+        for line in ("--wallpaper-dir /x kto", "kto --wallpaper-dir /x"):
+            with self.subTest(line=line):
+                args = self.parse(line)
+                self.assertEqual((args.command, args.wallpaper_dir), ("list", "/x"))
+
+    def test_errors_exit_2(self):
+        for line in (
+            "apply autumn --bogus",
+            "list extra",
+            "kto --eblo",
+            "undo --first-color",
+            "apply",
+            "nonexistent-thing",
+            "--wall /x kto",
+            "--eblo",
+        ):
+            with self.subTest(line=line):
+                self.assert_exit_2(line)
 
 
 if __name__ == "__main__":

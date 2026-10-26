@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import curses
 import json
 import os
@@ -17,6 +18,12 @@ from pathlib import Path
 # ============================================================
 # Paths
 # ============================================================
+
+VERSION = "0.3.0"
+
+# --dry-run: всё рендерится и проверяется, но конфиги, обои,
+# state и пресеты не меняются, перезагрузок нет.
+DRY_RUN = False
 
 ROOT = Path(__file__).resolve().parent
 
@@ -85,6 +92,16 @@ def warn(text):
 
 def toml_string(value):
     return json.dumps(str(value), ensure_ascii=False)
+
+
+def expand(value):
+    return Path(
+        os.path.expandvars(
+            os.path.expanduser(
+                str(value)
+            )
+        )
+    )
 
 
 def ensure_dirs():
@@ -1607,6 +1624,49 @@ def build_stage(
     return stage
 
 
+def dry_run_report(
+    rendered,
+    wallpaper,
+):
+    for staged, output, app_dir in (
+        rendered.values()
+    ):
+        skip = (
+            app_dir is not None
+            and not app_dir.is_dir()
+        )
+
+        info(
+            "dry-run: "
+            + (
+                "пропустил бы "
+                if skip
+                else "записал бы "
+            )
+            + str(output)
+        )
+
+    if "obsidian.css" in rendered:
+        info(
+            "dry-run: Obsidian vault'ы: "
+            + (
+                ", ".join(
+                    map(str, obsidian_vaults())
+                )
+                or "нет"
+            )
+        )
+
+    if wallpaper:
+        info(
+            f"dry-run: обои {wallpaper}"
+        )
+
+    info(
+        "dry-run: ничего не записано"
+    )
+
+
 def commit_stage(stage):
     try:
         palette = (
@@ -1638,6 +1698,13 @@ def commit_stage(stage):
             state["kitty_mode"],
             stage,
         )
+
+        if DRY_RUN:
+            dry_run_report(
+                rendered,
+                wallpaper,
+            )
+            return
 
         # Обои до записи конфигов: если hyprpaper упадёт, конфиги целы.
         if wallpaper:
@@ -1756,6 +1823,9 @@ def apply_preset(
         stage
     )
 
+    if DRY_RUN:
+        return
+
     info(
         f"применён пресет: "
         f"{name}"
@@ -1842,12 +1912,8 @@ def apply_image(
     *,
     poh=False,
 ):
-    image = Path(
-        os.path.expandvars(
-            os.path.expanduser(
-                image_argument
-            )
-        )
+    image = expand(
+        image_argument
     ).resolve()
 
     if not image.is_file():
@@ -1876,6 +1942,9 @@ def apply_image(
     commit_stage(
         stage
     )
+
+    if DRY_RUN:
+        return
 
     info(
         f"поставил: {image.name}"
@@ -1929,6 +1998,17 @@ def save_current(
     directory = (
         preset_path(name)
     )
+
+    if DRY_RUN:
+        info(
+            f"dry-run: сохранил бы {directory}"
+            + (
+                " с текущими обоями"
+                if with_wallpaper
+                else ""
+            )
+        )
+        return
 
     directory.mkdir(
         parents=True,
@@ -2005,6 +2085,12 @@ def delete_preset(name):
             f"{name}"
         )
 
+    if DRY_RUN:
+        info(
+            f"dry-run: удалил бы {preset_path(name)}"
+        )
+        return
+
     answer = input(
         f'Удалить "{name}"? [y/N]: '
     ).strip().lower()
@@ -2065,6 +2151,13 @@ def go_back():
             state["kitty_mode"],
             stage,
         )
+
+        if DRY_RUN:
+            dry_run_report(
+                rendered,
+                wallpaper,
+            )
+            return
 
         if (
             wallpaper
@@ -2725,128 +2818,243 @@ def interactive_step(cfg):
 # CLI
 # ============================================================
 
-def main():
+COMMANDS = {
+    # команда: (алиасы, справка)
+    "apply": (["--eblo PRESET"], "применить пресет"),
+    "image": (["--poh PATH"], "палитра из картинки"),
+    "save": (["chotko"], "сохранить текущую тему как пресет"),
+    "undo": (["govno"], "вернуть предыдущую тему (повтор — обратно)"),
+    "list": (["kto"], "список пресетов"),
+    "status": (["cho"], "что применено сейчас"),
+    "delete": (["nahui"], "удалить пресет"),
+}
+
+WALLPAPER_FLAGS = (
+    "--eblo",
+    "--wallpaper",
+)
+
+
+def translate_legacy(argv):
+    # Старые формы -> новые: "--poh IMG", "--eblo PRESET", "PRESET", "PATH".
+    # --eblo/--wallpaper переносятся в конец, чтобы работать в любой позиции.
+    wallpaper = [a for a in argv if a in WALLPAPER_FLAGS]
+    args = [a for a in argv if a not in WALLPAPER_FLAGS]
+
+    poh = "--poh" in args
+    args = [a for a in args if a != "--poh"]
+
+    index = 0
+
+    while index < len(args):
+        if args[index] == "--wallpaper-dir":
+            index += 2
+        elif args[index].startswith("-"):
+            index += 1
+        else:
+            break
+
+    if index < len(args):
+        word = args[index]
+        known = set(COMMANDS) | {
+            alias
+            for aliases, _ in COMMANDS.values()
+            for alias in aliases
+        }
+
+        if poh and word != "image":
+            args.insert(index, "image")
+
+        elif word not in known:
+            if preset_exists(word):
+                args.insert(index, "apply")
+
+            elif expand(word).is_file():
+                args.insert(index, "image")
+
+    elif poh:
+        args.append("image")
+
+    if poh:
+        args.append("--first-color")
+
+    return args + wallpaper
+
+
+def build_parser():
+    # Глобальные флаги принимаются и до, и после команды.
+    common = argparse.ArgumentParser(
+        add_help=False,
+        allow_abbrev=False,
+        argument_default=argparse.SUPPRESS,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="vnature",
+        description=(
+            "Темы для Hyprland из обоев через matugen. "
+            "Без команды открывается TUI."
+        ),
+        epilog=(
+            "Старые формы тоже работают:\n"
+            "  vnature PRESET         = apply PRESET\n"
+            "  vnature --eblo PRESET  = apply PRESET --eblo\n"
+            "  vnature PATH           = image PATH\n"
+            "  vnature --poh PATH     = image PATH --first-color"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+
+    for target, default in (
+        (parser, None),
+        (common, argparse.SUPPRESS),
+    ):
+        target.add_argument(
+            "--wallpaper-dir",
+            metavar="DIR",
+            default=default,
+            help="папка обоев вместо wallpaper_dir из config.toml",
+        )
+
+        target.add_argument(
+            "--dry-run",
+            action="store_true",
+            default=default or False,
+            help="всё проверить, но ничего не менять",
+        )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"vnature {VERSION}",
+    )
+
+    commands = parser.add_subparsers(
+        dest="command",
+        metavar="КОМАНДА",
+        title="команды",
+    )
+
+    def add(name):
+        aliases, text = COMMANDS[name]
+
+        # "--eblo PRESET" и "--poh PATH" — не алиасы argparse, только для справки
+        return commands.add_parser(
+            name,
+            aliases=[a for a in aliases if not a.startswith("-")],
+            help=text + "".join(
+                f" (или {a})"
+                for a in aliases
+                if a.startswith("-")
+            ),
+            parents=[common],
+            allow_abbrev=False,
+        )
+
+    def wallpaper_flag(command, text):
+        command.add_argument(
+            *WALLPAPER_FLAGS,
+            dest="eblo",
+            action="store_true",
+            help=text,
+        )
+
+    command = add("apply")
+    command.add_argument("preset", metavar="PRESET")
+    wallpaper_flag(command, "вместе с привязанными к пресету обоями")
+
+    command = add("image")
+    command.add_argument("path", metavar="PATH")
+    command.add_argument(
+        "--first-color",
+        action="store_true",
+        help="не спрашивать source color, взять первый",
+    )
+
+    command = add("save")
+    command.add_argument("name", metavar="NAME")
+    wallpaper_flag(command, "привязать к пресету текущие обои")
+
+    add("undo")
+    add("list")
+    add("status")
+
+    command = add("delete")
+    command.add_argument("name", metavar="NAME")
+
+    return parser
+
+
+def parse_args(argv):
+    args = build_parser().parse_args(
+        translate_legacy(argv)
+    )
+
+    for name, (aliases, _) in COMMANDS.items():
+        if args.command in aliases:
+            args.command = name
+
+    return args
+
+
+def main(argv=None):
+    global DRY_RUN
+
+    args = parse_args(
+        sys.argv[1:]
+        if argv is None
+        else argv
+    )
+
+    DRY_RUN = args.dry_run
 
     ensure_dirs()
 
     cfg = load_config()
 
-    args = sys.argv[1:]
-
-    if not args:
-        interactive(
-            cfg
-        )
-        return
-
-    command = args[0]
-
-    if command == "kto":
-        show_presets()
-        return
-
-    if command == "cho":
-        show_current()
-        return
-
-    if command == "govno":
-        go_back()
-        return
-
-    if command == "nahui":
-
-        if len(args) != 2:
-            raise VNatureError(
-                "vnature nahui NAME"
-            )
-
-        delete_preset(
-            args[1]
+    if args.wallpaper_dir:
+        cfg["wallpaper_dir"] = expand(
+            args.wallpaper_dir
         )
 
-        return
+    if args.command is None:
+        interactive(cfg)
 
-    if command == "chotko":
+    elif args.command == "apply":
+        apply_preset(
+            args.preset,
+            cfg,
+            with_wallpaper=args.eblo,
+        )
 
-        if len(args) not in (
-            2,
-            3,
-        ):
-            raise VNatureError(
-                "vnature chotko NAME "
-                "[--eblo]"
-            )
+    elif args.command == "image":
+        apply_image(
+            args.path,
+            cfg,
+            poh=args.first_color,
+        )
 
+    elif args.command == "save":
         save_current(
-            args[1],
+            args.name,
             cfg,
-            with_wallpaper=(
-                "--eblo"
-                in args[2:]
-            ),
+            with_wallpaper=args.eblo,
         )
 
-        return
+    elif args.command == "undo":
+        go_back()
 
-    if command == "--poh":
+    elif args.command == "list":
+        show_presets()
 
-        if len(args) != 2:
-            raise VNatureError(
-                "vnature --poh IMAGE"
-            )
+    elif args.command == "status":
+        show_current()
 
-        apply_image(
-            args[1],
-            cfg,
-            poh=True,
+    elif args.command == "delete":
+        delete_preset(
+            args.name
         )
-
-        return
-
-    if command == "--eblo":
-
-        if len(args) != 2:
-            raise VNatureError(
-                "vnature --eblo PRESET"
-            )
-
-        apply_preset(
-            args[1],
-            cfg,
-            with_wallpaper=True,
-        )
-
-        return
-
-    if preset_exists(
-        command
-    ):
-
-        apply_preset(
-            command,
-            cfg,
-        )
-
-        return
-
-    image = Path(
-        os.path.expanduser(
-            command
-        )
-    )
-
-    if image.is_file():
-
-        apply_image(
-            command,
-            cfg,
-        )
-
-        return
-
-    raise VNatureError(
-        f"не понял: {command}"
-    )
 
 
 if __name__ == "__main__":
