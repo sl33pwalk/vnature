@@ -1,0 +1,124 @@
+import importlib.machinery
+import importlib.util
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent.parent / "vnature"
+
+
+class Isolated(unittest.TestCase):
+    """Каждый тест грузит vnature заново с временным HOME и presets/."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+
+        loader = importlib.machinery.SourceFileLoader("vnature", str(SCRIPT))
+        spec = importlib.util.spec_from_loader("vnature", loader)
+        self.v = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.v)
+
+        self.v.PRESETS = self.home / "presets"
+        self.v.PRESETS.mkdir()
+        self.v.ensure_dirs()
+
+    def tearDown(self):
+        os.environ["HOME"] = self.old_home
+        self.tmp.cleanup()
+
+    def full_palette(self):
+        keys = self.v.read_palette(self.v.TEMPLATES / "palette.conf")
+        path = self.home / "palette.conf"
+        path.write_text("".join(f"{key}=#336699\n" for key in keys))
+        return path
+
+
+class PresetNames(Isolated):
+
+    def test_bad_names_rejected(self):
+        for name in ("", "../x", "..", "a/b", "a\\b", ".hidden", "a..b"):
+            with self.subTest(name=name):
+                self.assertFalse(self.v.valid_preset_name(name))
+                self.assertFalse(self.v.preset_exists(name))
+                with self.assertRaises(self.v.VNatureError):
+                    self.v.preset_path(name)
+
+    def test_good_names_accepted(self):
+        for name in ("autumn", "paint_girl", "a.b", "тема"):
+            with self.subTest(name=name):
+                self.assertEqual(self.v.preset_path(name), self.v.PRESETS / name)
+
+    def test_remove_refuses_symlink_outside(self):
+        outside = self.home / "outside"
+        outside.mkdir()
+        (outside / "palette.conf").write_text("x=1\n")
+        (self.v.PRESETS / "evil").symlink_to(outside)
+
+        with self.assertRaises(self.v.VNatureError):
+            self.v.remove_preset("evil")
+
+        self.assertTrue((outside / "palette.conf").is_file())
+
+    def test_remove_inside_presets(self):
+        (self.v.PRESETS / "ok").mkdir()
+        self.v.remove_preset("ok")
+        self.assertFalse((self.v.PRESETS / "ok").exists())
+
+
+class Rendering(Isolated):
+
+    def test_missing_key_fails_before_writing(self):
+        palette = self.home / "bad.conf"
+        palette.write_text("primary=#ffffff\n")
+        stage = self.home / "stage"
+        stage.mkdir()
+
+        with self.assertRaises(self.v.VNatureError):
+            self.v.render_apps(palette, "accent", stage)
+
+        self.assertEqual(list(self.v.GENERATED.iterdir()), [])
+        self.assertFalse((self.home / ".config/kitty").exists())
+
+    def test_render_does_not_touch_real_paths(self):
+        stage = self.home / "stage"
+        stage.mkdir()
+        for mode in ("accent", "balanced", "full"):
+            rendered = self.v.render_apps(self.full_palette(), mode, stage)
+            for staged, _, _ in rendered.values():
+                self.assertNotIn("{{", staged.read_text())
+
+        self.assertEqual(list(self.v.GENERATED.iterdir()), [])
+
+    def test_install_skips_missing_app_dirs(self):
+        (self.home / ".config/kitty").mkdir(parents=True)
+        stage = self.home / "stage"
+        stage.mkdir()
+        rendered = self.v.render_apps(self.full_palette(), "accent", stage)
+
+        polybar, kitty = self.v.install_apps(rendered)
+
+        self.assertTrue(kitty)
+        self.assertTrue(self.v.KITTY_THEME.is_file())
+        self.assertTrue(polybar)
+        self.assertTrue(self.v.POLYBAR_GENERATED.is_file())
+        for app in ("hypr", "waybar", "swaync"):
+            self.assertFalse((self.home / ".config" / app).exists(), app)
+
+    def test_failed_commit_removes_stage(self):
+        palette = self.home / "bad.conf"
+        palette.write_text("primary=#ffffff\n")
+        stage = self.v.build_stage(palette, name="x", wallpaper=None, kitty_mode="accent")
+
+        with self.assertRaises(self.v.VNatureError):
+            self.v.commit_stage(stage)
+
+        self.assertFalse(stage.exists())
+        self.assertFalse(self.v.CURRENT.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

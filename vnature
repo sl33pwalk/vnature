@@ -95,7 +95,6 @@ def ensure_dirs():
         CACHE,
         MATUGEN_DIR,
         GENERATED,
-        KITTY_THEMES,
     ):
         path.mkdir(
             parents=True,
@@ -183,15 +182,34 @@ def save_config(cfg):
 # Presets
 # ============================================================
 
+def valid_preset_name(name):
+    return bool(
+        name
+        and not name.startswith(".")
+        and "/" not in name
+        and "\\" not in name
+        and ".." not in name
+    )
+
+
 def preset_path(name):
+    if not valid_preset_name(name):
+        raise VNatureError(
+            f"плохое имя пресета: {name!r}"
+        )
+
     return PRESETS / name
 
 
 def preset_exists(name):
     return (
-        preset_path(name)
-        / "palette.conf"
-    ).is_file()
+        valid_preset_name(name)
+        and
+        (
+            preset_path(name)
+            / "palette.conf"
+        ).is_file()
+    )
 
 
 def get_presets():
@@ -203,6 +221,7 @@ def get_presets():
         for directory in PRESETS.iterdir()
         if (
             directory.is_dir()
+            and valid_preset_name(directory.name)
             and
             (
                 directory
@@ -210,6 +229,18 @@ def get_presets():
             ).is_file()
         )
     )
+
+
+def remove_preset(name):
+    path = preset_path(name).resolve()
+
+    # Симлинк или хитрое имя не должны увести rmtree за пределы presets/.
+    if path.parent != PRESETS.resolve():
+        raise VNatureError(
+            f"пресет вне {PRESETS}: {path}"
+        )
+
+    shutil.rmtree(path)
 
 
 def load_preset(name):
@@ -722,11 +753,10 @@ def mix(a, b, amount):
 
 def render_template(
     template,
-    output,
     values,
 ):
     if not template.is_file():
-        return False
+        return None
 
     text = template.read_text(
         encoding="utf-8"
@@ -752,30 +782,7 @@ def render_template(
             f"остались переменные"
         )
 
-    output.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary = (
-        output.parent
-        / (
-            "."
-            + output.name
-            + ".tmp"
-        )
-    )
-
-    temporary.write_text(
-        text,
-        encoding="utf-8",
-    )
-
-    temporary.replace(
-        output
-    )
-
-    return True
+    return text
 
 
 # ============================================================
@@ -1316,30 +1323,29 @@ def sync_obsidian_theme(
 def render_apps(
     palette_file,
     kitty_mode,
+    stage,
 ):
+    # Только рендер и проверка в stage/rendered, реальные файлы не трогаем.
     palette = read_palette(
         palette_file
     )
 
-    polybar_changed = (
-        render_template(
-            TEMPLATES
-            / "polybar.ini",
-
-            POLYBAR_GENERATED,
-
-            palette,
+    missing = sorted(
+        set(
+            read_palette(
+                TEMPLATES
+                / "palette.conf"
+            )
         )
+        - set(palette)
     )
 
-    render_template(
-        TEMPLATES
-        / "rofi.rasi",
-
-        ROFI_GENERATED,
-
-        palette,
-    )
+    if missing:
+        raise VNatureError(
+            f"в палитре {palette_file} "
+            f"нет ключей: "
+            + ", ".join(missing)
+        )
 
     hypr = dict(
         palette
@@ -1360,45 +1366,6 @@ def render_apps(
         .lstrip("#")
     )
 
-    render_template(
-        TEMPLATES
-        / "hyprland.lua",
-
-        HYPRLAND_THEME,
-
-        hypr,
-    )
-
-    render_template(
-        TEMPLATES
-        / "swaync.css",
-
-        SWAYNC_THEME,
-
-        palette,
-    )
-
-    render_template(
-        TEMPLATES
-        / "waybar.css",
-
-        WAYBAR_THEME,
-
-        palette,
-    )
-
-    if render_template(
-        TEMPLATES
-        / "obsidian.css",
-
-        OBSIDIAN_GENERATED,
-
-        palette,
-    ):
-        sync_obsidian_theme(
-            OBSIDIAN_GENERATED
-        )
-
     kitty = dict(
         palette
     )
@@ -1410,20 +1377,113 @@ def render_apps(
         )
     )
 
-    kitty_changed = (
-        render_template(
-            TEMPLATES
-            / "kitty.conf",
+    # шаблон, куда, папка приложения (None — пишем в кэш всегда), значения
+    jobs = [
+        ("polybar.ini", POLYBAR_GENERATED, None, palette),
+        ("rofi.rasi", ROFI_GENERATED, None, palette),
+        ("hyprland.lua", HYPRLAND_THEME, HYPRLAND_THEME.parent, hypr),
+        ("swaync.css", SWAYNC_THEME, SWAYNC_THEME.parent, palette),
+        ("waybar.css", WAYBAR_THEME, WAYBAR_THEME.parent, palette),
+        ("obsidian.css", OBSIDIAN_GENERATED, None, palette),
+        ("kitty.conf", KITTY_THEME, KITTY_THEMES.parent, kitty),
+    ]
 
-            KITTY_THEME,
-
-            kitty,
-        )
+    rendered_dir = (
+        stage
+        / "rendered"
     )
 
+    rendered_dir.mkdir(
+        exist_ok=True,
+    )
+
+    rendered = {}
+
+    for template_name, output, app_dir, values in jobs:
+
+        text = render_template(
+            TEMPLATES
+            / template_name,
+
+            values,
+        )
+
+        if text is None:
+            continue
+
+        staged = (
+            rendered_dir
+            / template_name
+        )
+
+        staged.write_text(
+            text,
+            encoding="utf-8",
+        )
+
+        rendered[template_name] = (
+            staged,
+            output,
+            app_dir,
+        )
+
+    return rendered
+
+
+def install_apps(rendered):
+    installed = set()
+
+    for template_name, (
+        staged,
+        output,
+        app_dir,
+    ) in rendered.items():
+
+        if (
+            app_dir is not None
+            and not app_dir.is_dir()
+        ):
+            info(
+                f"{app_dir.name}: нет "
+                f"{app_dir}, пропускаю"
+            )
+            continue
+
+        output.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = (
+            output.parent
+            / (
+                "."
+                + output.name
+                + ".tmp"
+            )
+        )
+
+        shutil.copyfile(
+            staged,
+            temporary,
+        )
+
+        temporary.replace(
+            output
+        )
+
+        installed.add(
+            template_name
+        )
+
+    if "obsidian.css" in installed:
+        sync_obsidian_theme(
+            OBSIDIAN_GENERATED
+        )
+
     return (
-        polybar_changed,
-        kitty_changed,
+        "polybar.ini" in installed,
+        "kitty.conf" in installed,
     )
 
 
@@ -1524,70 +1584,97 @@ def build_stage(
         )
     )
 
-    shutil.copy2(
-        palette,
-        stage / "palette.conf",
-    )
+    try:
+        shutil.copy2(
+            palette,
+            stage / "palette.conf",
+        )
 
-    write_state(
-        stage,
-        name=name,
-        wallpaper=wallpaper,
-        kitty_mode=kitty_mode,
-    )
+        write_state(
+            stage,
+            name=name,
+            wallpaper=wallpaper,
+            kitty_mode=kitty_mode,
+        )
+
+    except BaseException:
+        shutil.rmtree(
+            stage,
+            ignore_errors=True,
+        )
+        raise
 
     return stage
 
 
 def commit_stage(stage):
-    palette = (
-        stage
-        / "palette.conf"
-    )
-
-    state = read_state(
-        stage
-    )
-
-    wallpaper = (
-        Path(state["wallpaper"])
-        if state.get("wallpaper")
-        else None
-    )
-
-    if (
-        wallpaper
-        and not wallpaper.is_file()
-    ):
-        raise VNatureError(
-            f"обои исчезли: "
-            f"{wallpaper}"
+    try:
+        palette = (
+            stage
+            / "palette.conf"
         )
 
-    (
-        polybar_changed,
-        kitty_changed,
-    ) = render_apps(
-        palette,
-        state["kitty_mode"],
-    )
+        state = read_state(
+            stage
+        )
 
-    if wallpaper:
-        set_wallpaper(
+        wallpaper = (
+            Path(state["wallpaper"])
+            if state.get("wallpaper")
+            else None
+        )
+
+        if (
             wallpaper
+            and not wallpaper.is_file()
+        ):
+            raise VNatureError(
+                f"обои исчезли: "
+                f"{wallpaper}"
+            )
+
+        rendered = render_apps(
+            palette,
+            state["kitty_mode"],
+            stage,
         )
 
-    remember_current()
+        # Обои до записи конфигов: если hyprpaper упадёт, конфиги целы.
+        if wallpaper:
+            set_wallpaper(
+                wallpaper
+            )
 
-    if CURRENT.exists():
+        (
+            polybar_changed,
+            kitty_changed,
+        ) = install_apps(
+            rendered
+        )
+
         shutil.rmtree(
-            CURRENT
+            stage
+            / "rendered"
         )
 
-    shutil.move(
-        str(stage),
-        str(CURRENT),
-    )
+        remember_current()
+
+        if CURRENT.exists():
+            shutil.rmtree(
+                CURRENT
+            )
+
+        shutil.move(
+            str(stage),
+            str(CURRENT),
+        )
+
+    finally:
+        if stage.exists():
+            shutil.rmtree(
+                stage,
+                ignore_errors=True,
+            )
 
     if polybar_changed:
         reload_polybar()
@@ -1910,6 +1997,8 @@ def save_current(
 
 
 def delete_preset(name):
+    preset_path(name)
+
     if not preset_exists(name):
         raise VNatureError(
             f"такого пресета нет: "
@@ -1929,8 +2018,8 @@ def delete_preset(name):
         info("не трогаю")
         return
 
-    shutil.rmtree(
-        preset_path(name)
+    remove_preset(
+        name
     )
 
     info(
@@ -1963,20 +2052,39 @@ def go_back():
         else None
     )
 
-    (
-        polybar_changed,
-        kitty_changed,
-    ) = render_apps(
-        palette,
-        state["kitty_mode"],
+    stage = Path(
+        tempfile.mkdtemp(
+            prefix="stage-",
+            dir=CACHE,
+        )
     )
 
-    if (
-        wallpaper
-        and wallpaper.is_file()
-    ):
-        set_wallpaper(
+    try:
+        rendered = render_apps(
+            palette,
+            state["kitty_mode"],
+            stage,
+        )
+
+        if (
             wallpaper
+            and wallpaper.is_file()
+        ):
+            set_wallpaper(
+                wallpaper
+            )
+
+        (
+            polybar_changed,
+            kitty_changed,
+        ) = install_apps(
+            rendered
+        )
+
+    finally:
+        shutil.rmtree(
+            stage,
+            ignore_errors=True,
         )
 
     swap = (
@@ -2052,6 +2160,11 @@ def show_current():
 
 
 def show_presets():
+    if not get_presets():
+        info(
+            f"пресетов нет: {PRESETS}"
+        )
+
     for name in get_presets():
 
         preset = load_preset(
@@ -2087,20 +2200,57 @@ def menu(
         curses.curs_set(0)
 
         index = 0
+        top = 0
 
         while True:
 
             stdscr.erase()
 
-            stdscr.addstr(
+            height, width = (
+                stdscr.getmaxyx()
+            )
+
+            # Строки под пункты: заголовок сверху, подсказка снизу.
+            rows = max(
                 1,
-                2,
+                height - 5,
+            )
+
+            if index < top:
+                top = index
+
+            elif index >= top + rows:
+                top = index - rows + 1
+
+            def put(y, text, attribute):
+                if 0 <= y < height:
+                    stdscr.addnstr(
+                        y,
+                        2,
+                        text,
+                        max(1, width - 3),
+                        attribute,
+                    )
+
+            put(
+                1,
                 title,
                 curses.A_BOLD,
             )
 
-            for position, item in (
-                enumerate(items)
+            if not items:
+                put(
+                    3,
+                    "(пусто)",
+                    curses.A_DIM,
+                )
+
+            for position in range(
+                top,
+                min(
+                    len(items),
+                    top + rows,
+                ),
             ):
 
                 marker = (
@@ -2115,24 +2265,43 @@ def menu(
                     else curses.A_NORMAL
                 )
 
-                stdscr.addstr(
-                    3 + position,
-                    2,
-                    marker + item,
+                put(
+                    3 + position - top,
+                    marker + items[position],
                     attribute,
                 )
 
-            stdscr.addstr(
-                5 + len(items),
-                2,
+            hint = (
                 "↑/↓ j/k · "
-                "Enter · q/Esc",
+                "Enter · q/Esc"
+            )
+
+            if len(items) > rows:
+                hint += (
+                    f" · {index + 1}/{len(items)}"
+                )
+
+            put(
+                4 + min(
+                    max(1, len(items)),
+                    rows,
+                ),
+                hint,
                 curses.A_DIM,
             )
 
             key = stdscr.getch()
 
-            if key in (
+            if not items:
+                if key in (
+                    10,
+                    13,
+                    27,
+                    ord("q"),
+                ):
+                    return None
+
+            elif key in (
                 curses.KEY_UP,
                 ord("k"),
             ):
@@ -2414,8 +2583,8 @@ def interactive_manage(cfg):
         )
 
         if confirmation == 1:
-            shutil.rmtree(
-                preset_path(name)
+            remove_preset(
+                name
             )
 
     pause()
@@ -2479,58 +2648,77 @@ def interactive(cfg):
 
     while True:
 
-        action = menu(
-            "VNature",
-            [
-                "Выбрать обои",
-                "Применить тему",
-                "Чётко — сохранить",
-                "Говно — назад",
-                "Управление пресетами",
-                "Настройки Kitty",
-                "Что сейчас",
-                "Выйти",
-            ],
+        try:
+            if interactive_step(cfg) is False:
+                return
+
+        except VNatureError as error:
+            warn(error)
+            pause()
+
+        except subprocess.CalledProcessError as error:
+            warn(
+                "команда упала "
+                f"с кодом "
+                f"{error.returncode}"
+            )
+            pause()
+
+
+def interactive_step(cfg):
+
+    action = menu(
+        "VNature",
+        [
+            "Выбрать обои",
+            "Применить тему",
+            "Чётко — сохранить",
+            "Говно — назад",
+            "Управление пресетами",
+            "Настройки Kitty",
+            "Что сейчас",
+            "Выйти",
+        ],
+    )
+
+    if action is None:
+        return False
+
+    if action == 0:
+        interactive_wallpaper(
+            cfg
         )
 
-        if action is None:
-            return
+    elif action == 1:
+        interactive_apply(
+            cfg
+        )
 
-        if action == 0:
-            interactive_wallpaper(
-                cfg
-            )
+    elif action == 2:
+        interactive_save(
+            cfg
+        )
 
-        elif action == 1:
-            interactive_apply(
-                cfg
-            )
+    elif action == 3:
+        go_back()
+        pause()
 
-        elif action == 2:
-            interactive_save(
-                cfg
-            )
+    elif action == 4:
+        interactive_manage(
+            cfg
+        )
 
-        elif action == 3:
-            go_back()
-            pause()
+    elif action == 5:
+        interactive_settings(
+            cfg
+        )
 
-        elif action == 4:
-            interactive_manage(
-                cfg
-            )
+    elif action == 6:
+        show_current()
+        pause()
 
-        elif action == 5:
-            interactive_settings(
-                cfg
-            )
-
-        elif action == 6:
-            show_current()
-            pause()
-
-        elif action == 7:
-            return
+    elif action == 7:
+        return False
 
 
 # ============================================================
