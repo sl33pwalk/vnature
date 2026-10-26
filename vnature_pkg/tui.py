@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import termios
+import textwrap
 import time
 from pathlib import Path
 
@@ -1486,13 +1487,16 @@ class TUI:
             height, width = self.scr.getmaxyx()
             x, list_width, right, right_width = panels(width)
 
-            if error:
-                self.put(first, x, error, self.role("error"), list_width)
-
             rows = max(1, last - first + 1)
             top = scroll_top(index, top, rows)
             self.positions[context] = (index, top)
-            self.draw_list(first, last, x, list_width, [label for label, _ in items], index, top)
+
+            # Ошибка вместо списка (он тогда пуст), переносом по ширине: путь целиком.
+            if error:
+                self.lines(first, last, x, list_width,
+                           [(line, "error") for line in textwrap.wrap(error, list_width, break_on_hyphens=False)])
+            else:
+                self.draw_list(first, last, x, list_width, [label for label, _ in items], index, top)
 
             if right is not None:
                 self.separator(first, last, right - 2)
