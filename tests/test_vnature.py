@@ -208,5 +208,78 @@ class ArgParsing(Isolated):
                 self.assert_exit_2(line)
 
 
+class WallpaperDir(Isolated):
+
+    def test_priority(self):
+        self.v.CONFIG_FILE.unlink(missing_ok=True)
+        self.v.CONFIG_FILE.write_text('mode = "dark"\n')
+        self.assertEqual(self.v.load_config()["wallpaper_dir"], self.home / "Pictures/wp")
+
+        self.v.CONFIG_FILE.write_text('wallpaper_dir = "$HOME/cfg"\n')
+        self.assertEqual(self.v.load_config()["wallpaper_dir"], self.home / "cfg")
+
+        self.assertEqual(self.v.load_config("~/flag")["wallpaper_dir"], self.home / "flag")
+
+    def test_default_when_config_missing(self):
+        self.v.CONFIG_FILE.unlink(missing_ok=True)
+        self.assertEqual(self.v.load_config()["wallpaper_dir"], self.home / "Pictures/wp")
+
+    def test_missing_explicit_dir_is_error(self):
+        with self.assertRaises(self.v.VNatureError) as caught:
+            self.v.main(["--wallpaper-dir", str(self.home / "nope"), "kto"])
+        self.assertIn("нет папки обоев", str(caught.exception))
+
+    def test_images_errors_and_filter(self):
+        folder = self.home / "wp"
+        with self.assertRaises(self.v.VNatureError):
+            self.v.wallpaper_images(folder)
+
+        folder.mkdir()
+        (folder / "notes.txt").write_text("")
+        with self.assertRaises(self.v.VNatureError):
+            self.v.wallpaper_images(folder)
+
+        (folder / "b.PNG").write_bytes(b"")
+        (folder / "a.jpg").write_bytes(b"")
+        self.assertEqual([p.name for p in self.v.wallpaper_images(folder)], ["a.jpg", "b.PNG"])
+
+
+class ConfigKeys(Isolated):
+
+    def test_set_key_keeps_comments_and_foreign_keys(self):
+        self.v.CONFIG_FILE.write_text(
+            "# мой конфиг\n"
+            'wallpaper_dir = "~/Pictures/wp"  # старый\n'
+            "custom = 42\n"
+            'kitty_mode = "accent"\n'
+            "\n"
+            "[extra]\n"
+            'kitty_mode = "чужой"\n'
+        )
+
+        self.v.set_config_key("kitty_mode", "full")
+        self.v.set_config_key("wallpaper_dir", "~/new")
+        self.v.set_config_key("mode", "light")
+
+        text = self.v.CONFIG_FILE.read_text()
+        self.assertIn("# мой конфиг\n", text)
+        self.assertIn("custom = 42\n", text)
+        self.assertIn('[extra]\nkitty_mode = "чужой"\n', text)
+
+        data = self.v.tomllib.loads(text)
+        self.assertEqual(data["kitty_mode"], "full")
+        self.assertEqual(data["wallpaper_dir"], "~/new")
+        self.assertEqual(data["mode"], "light")
+        self.assertEqual(data["extra"], {"kitty_mode": "чужой"})
+
+    def test_dry_run_does_not_write(self):
+        self.v.ensure_config()
+        before = self.v.CONFIG_FILE.read_text()
+        self.v.DRY_RUN = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.v.set_config_key("kitty_mode", "full")
+        self.assertEqual(self.v.CONFIG_FILE.read_text(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

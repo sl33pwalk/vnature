@@ -142,7 +142,10 @@ def ensure_config():
     )
 
 
-def load_config():
+def load_config(
+    wallpaper_dir=None,
+):
+    # Папка обоев: --wallpaper-dir > wallpaper_dir из config.toml > ~/Pictures/wp
     ensure_config()
 
     try:
@@ -153,18 +156,12 @@ def load_config():
             f"не могу прочитать config.toml: {error}"
         )
 
-    wallpaper_raw = str(
-        raw.get(
+    wallpaper_dir = expand(
+        wallpaper_dir
+        if wallpaper_dir is not None
+        else raw.get(
             "wallpaper_dir",
             "~/Pictures/wp",
-        )
-    )
-
-    wallpaper_dir = Path(
-        os.path.expandvars(
-            os.path.expanduser(
-                wallpaper_raw
-            )
         )
     )
 
@@ -180,19 +177,103 @@ def load_config():
 
     return {
         "wallpaper_dir": wallpaper_dir,
-        "wallpaper_dir_raw": wallpaper_raw,
         "mode": str(raw.get("mode", "dark")),
         "kitty_mode": kitty_mode,
     }
 
 
-def save_config(cfg):
-    CONFIG_FILE.write_text(
-        f'wallpaper_dir = {toml_string(cfg["wallpaper_dir_raw"])}\n'
-        f'mode = {toml_string(cfg["mode"])}\n'
-        f'kitty_mode = {toml_string(cfg["kitty_mode"])}\n',
+def set_config_key(key, value):
+    # Меняем одну строку верхнего уровня; комментарии и чужие ключи не трогаем.
+    if DRY_RUN:
+        info(
+            f"dry-run: записал бы {key} = "
+            f"{toml_string(value)} в {CONFIG_FILE}"
+        )
+        return
+
+    ensure_config()
+
+    lines = CONFIG_FILE.read_text(
+        encoding="utf-8"
+    ).splitlines()
+
+    line = f"{key} = {toml_string(value)}"
+
+    # Ключи верхнего уровня кончаются на первой [таблице].
+    end = next(
+        (
+            position
+            for position, text in enumerate(lines)
+            if text.lstrip().startswith("[")
+        ),
+        len(lines),
+    )
+
+    for position in range(end):
+        name = lines[position].split("=", 1)[0].strip()
+
+        if (
+            "=" in lines[position]
+            and name == key
+        ):
+            lines[position] = line
+            break
+
+    else:
+        lines.insert(
+            end,
+            line,
+        )
+
+    text = "\n".join(lines) + "\n"
+
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise VNatureError(
+            f"не могу обновить config.toml: {error}"
+        )
+
+    temporary = (
+        CONFIG_FILE.parent
+        / ".config.toml.tmp"
+    )
+
+    temporary.write_text(
+        text,
         encoding="utf-8",
     )
+
+    temporary.replace(
+        CONFIG_FILE
+    )
+
+
+def wallpaper_images(directory):
+    if not directory.is_dir():
+        raise VNatureError(
+            f"нет папки обоев: {directory} "
+            "(wallpaper_dir в config.toml или --wallpaper-dir)"
+        )
+
+    images = sorted(
+        path
+        for path in directory.iterdir()
+        if (
+            path.is_file()
+            and
+            path.suffix.lower()
+            in IMAGE_EXTENSIONS
+        )
+    )
+
+    if not images:
+        raise VNatureError(
+            f"в папке обоев нет картинок: {directory} "
+            "(" + ", ".join(sorted(IMAGE_EXTENSIONS)) + ")"
+        )
+
+    return images
 
 
 # ============================================================
@@ -256,6 +337,12 @@ def remove_preset(name):
         raise VNatureError(
             f"пресет вне {PRESETS}: {path}"
         )
+
+    if DRY_RUN:
+        info(
+            f"dry-run: удалил бы {path}"
+        )
+        return
 
     shutil.rmtree(path)
 
@@ -344,6 +431,13 @@ def save_preset_meta(
         "kitty_mode = "
         + toml_string(kitty_mode)
     )
+
+    if DRY_RUN:
+        info(
+            f"dry-run: записал бы {directory / 'preset.toml'}: "
+            + "; ".join(lines)
+        )
+        return
 
     (
         directory
@@ -2566,8 +2660,9 @@ def interactive_settings(cfg):
         "kitty_mode"
     ] = selected
 
-    save_config(
-        cfg
+    set_config_key(
+        "kitty_mode",
+        selected,
     )
 
     info(
@@ -2685,20 +2780,9 @@ def interactive_manage(cfg):
 
 def interactive_wallpaper(cfg):
 
-    images = sorted(
-        [
-            path
-            for path in (
-                cfg[
-                    "wallpaper_dir"
-                ].iterdir()
-            )
-            if (
-                path.is_file()
-                and
-                path.suffix.lower()
-                in IMAGE_EXTENSIONS
-            )
+    images = wallpaper_images(
+        cfg[
+            "wallpaper_dir"
         ]
     )
 
@@ -2737,6 +2821,41 @@ def interactive_wallpaper(cfg):
     pause()
 
 
+def interactive_wallpaper_dir(cfg):
+
+    print(
+        "Папка обоев: "
+        f"{cfg['wallpaper_dir']}"
+    )
+
+    raw = input(
+        "Новая папка (пусто — оставить): "
+    ).strip()
+
+    if not raw:
+        return
+
+    images = wallpaper_images(
+        expand(raw)
+    )
+
+    set_config_key(
+        "wallpaper_dir",
+        raw,
+    )
+
+    cfg[
+        "wallpaper_dir"
+    ] = expand(raw)
+
+    info(
+        f"папка обоев: {raw} "
+        f"(картинок: {len(images)})"
+    )
+
+    pause()
+
+
 def interactive(cfg):
 
     while True:
@@ -2769,6 +2888,7 @@ def interactive_step(cfg):
             "Говно — назад",
             "Управление пресетами",
             "Настройки Kitty",
+            "Папка обоев",
             "Что сейчас",
             "Выйти",
         ],
@@ -2807,10 +2927,15 @@ def interactive_step(cfg):
         )
 
     elif action == 6:
+        interactive_wallpaper_dir(
+            cfg
+        )
+
+    elif action == 7:
         show_current()
         pause()
 
-    elif action == 7:
+    elif action == 8:
         return False
 
 
@@ -3011,12 +3136,16 @@ def main(argv=None):
 
     ensure_dirs()
 
-    cfg = load_config()
+    cfg = load_config(
+        args.wallpaper_dir
+    )
 
-    if args.wallpaper_dir:
-        cfg["wallpaper_dir"] = expand(
-            args.wallpaper_dir
-        )
+    # Явно заданную папку проверяем сразу, папку из config.toml — при использовании.
+    if args.wallpaper_dir is not None:
+        if not cfg["wallpaper_dir"].is_dir():
+            raise VNatureError(
+                f"нет папки обоев: {cfg['wallpaper_dir']}"
+            )
 
     if args.command is None:
         interactive(cfg)
