@@ -69,24 +69,24 @@ IMAGE_EXTENSIONS = {
     ".jxl",
 }
 
-# Режимы kitty — единственный список: подпись и точка на шкале силы 0–100.
-# None — off: чистая база (kitty_base или STABLE), палитра не подмешивается.
-# В config/preset/state kitty_mode — имя отсюда или целое 0–100.
+# Режимы kitty - единственный список: подпись и точка на шкале силы 0–100.
+# None - off: чистая база (kitty_base или STABLE), палитра не подмешивается.
+# В config/preset/state kitty_mode - имя отсюда или целое 0–100.
 KITTY_MODES = {
     "accent": (
-        "Accent — минимум изменений",
+        "Accent - минимум изменений",
         15,
     ),
     "balanced": (
-        "Balanced — адаптивно",
+        "Balanced - адаптивно",
         50,
     ),
     "full": (
-        "Full — ебашим",
+        "Full - ебашим",
         100,
     ),
     "off": (
-        "Off — чистая база, без палитры",
+        "Off - чистая база, без палитры",
         None,
     ),
 }
@@ -94,7 +94,7 @@ KITTY_MODES = {
 # Сила -> (surface, ansi), кусочно-линейно между точками.
 # surface: насколько фон и текст уходят от базы к палитре;
 # ansi: насколько яркость и насыщенность ANSI уходят к палитре.
-# Точки 15/50/100 — прежние accent/balanced/full, их вывод не меняется.
+# Точки 15/50/100 - прежние accent/balanced/full, их вывод не меняется.
 KITTY_CURVE = (
     (0, 0.0, 0.0),
     (15, 0.06, 0.0),
@@ -507,7 +507,7 @@ def effective_kitty_mode(
 
 def kitty_strength(value):
     # Имя режима, целое 0–100 или строка "35"/"35%" -> 0–100 или "off".
-    # None — значение непонятное.
+    # None - значение непонятное.
     if isinstance(value, bool):
         return None
 
@@ -1142,7 +1142,7 @@ def ensure_contrast(color, against, ratio):
 
 
 def shift_ansi(base, target, amount):
-    # Оттенок от базы; яркость и насыщенность — к роли палитры.
+    # Оттенок от базы; яркость и насыщенность - к роли палитры.
     # Цель зажата, чтобы цвет не выцвел в серый и не ушёл в чёрный/белый.
     h, l, s = to_hls(base)
     _, target_l, target_s = to_hls(target)
@@ -1193,7 +1193,7 @@ def kitty_base(cfg):
         ):
             raise VNatureError(
                 f"kitty_base {path}: {parts[0]} {parts[1]} "
-                "— нужен цвет вида #rrggbb"
+                "- нужен цвет вида #rrggbb"
             )
 
         base[parts[0]] = value
@@ -1304,7 +1304,7 @@ def kitty_colors(
             ansi,
         )
 
-    # color0 часто служит фоном панелей — не должен слиться с фоном.
+    # color0 часто служит фоном панелей - не должен слиться с фоном.
     result["kitty_color0"] = ensure_contrast(
         result["kitty_color0"],
         bg,
@@ -1525,7 +1525,7 @@ def render_apps(
         base,
     )
 
-    # шаблон, куда, папка приложения (None — пишем в кэш всегда), значения
+    # шаблон, куда, папка приложения (None - пишем в кэш всегда), значения
     jobs = [
         ("polybar.ini", POLYBAR_GENERATED, None, palette),
         ("rofi.rasi", ROFI_GENERATED, None, palette),
@@ -1699,7 +1699,7 @@ def reload_kitty(proc=Path("/proc")):
     # kitty >= 0.49 перечитывает kitty.conf вместе с include по SIGUSR1
     # (man kitty.conf). Сигналим только своим процессам с comm == kitty.
     # Если у kitty есть свой наблюдатель (auto_reload_config, по умолчанию
-    # включён), он сам замечает замену vnature.conf из include, — второй
+    # включён), он сам замечает замену vnature.conf из include, - второй
     # сигнал дал бы лишнюю перерисовку.
     kitties = []
     watched = set()
@@ -1992,7 +1992,7 @@ def current_kitty_target(
     preset_modes=None,
 ):
     # Какой kitty_mode должен быть у текущей темы при нынешних настройках.
-    # None — темы нет или её пресет не найден: трогать нечего.
+    # None - темы нет или её пресет не найден: трогать нечего.
     # preset_modes: {имя: режим} поверх preset.toml (нужно для --dry-run).
     if state is None:
         return None
@@ -2226,7 +2226,7 @@ def apply_image(
 
         info(
             "dry-run: matugen всё равно запускается, "
-            f"его конфиг и палитра — во временной {matugen_dir}"
+            f"его конфиг и палитра - во временной {matugen_dir}"
         )
 
     try:
@@ -2617,14 +2617,14 @@ KEYMAP = {
     "общие": (
         (("1", "2", "3", "4", "Tab", "S-Tab"), "вкладки"),
         (("↑", "↓", "j", "k", "PgUp", "PgDn"), "выбор"),
-        (("s",), "Чётко — сохранить текущую тему"),
-        (("u",), "Говно — назад"),
+        (("s",), "Чётко - сохранить текущую тему"),
+        (("u",), "Говно - назад"),
         (("?",), "справка"),
         (("q",), "выход"),
     ),
     "Обои": (
         (("Enter",), "выбрать source color"),
-        (("f",), "Мне пох — бери первый"),
+        (("f",), "Мне пох - бери первый"),
         (("o",), "папка обоев"),
     ),
     "Пресеты": (
@@ -2638,16 +2638,16 @@ KEYMAP = {
     "Kitty": (
         (("←", "→", "h", "l"), "сила ±5%"),
         (("S-←", "S-→", "H", "L"), "сила ±25%"),
-        (("a", "b", "f"), "точки: Accent / Balanced / Full — ебашим"),
-        (("o",), "Off — чистая база, без палитры"),
+        (("a", "b", "f"), "точки: Accent / Balanced / Full - ебашим"),
+        (("o",), "Off - чистая база, без палитры"),
         (("Enter",), "сохранить в config"),
         (("Esc",), "вернуть как было"),
     ),
     "Kitty пресета": (
         (("←", "→", "h", "l"), "сила ±5%"),
         (("S-←", "S-→", "H", "L"), "сила ±25%"),
-        (("a", "b", "f"), "точки: Accent / Balanced / Full — ебашим"),
-        (("o",), "Off — чистая база, без палитры"),
+        (("a", "b", "f"), "точки: Accent / Balanced / Full - ебашим"),
+        (("o",), "Off - чистая база, без палитры"),
         (("i",), "наследовать глобальный"),
         (("Enter",), "сохранить в пресет"),
         (("Esc",), "вернуть как было и закрыть"),
@@ -2681,7 +2681,7 @@ SLIDER_DELAY = 0.2
 
 def slide(value, key, fallback, inherit=False):
     # Шаг ползунка силы kitty. value: 0–100, "off" или "inherit";
-    # fallback — от какой силы шагать с off/inherit.
+    # fallback - от какой силы шагать с off/inherit.
     # -> новое значение или None, если клавиша не про ползунок.
     points = {"a": "accent", "b": "balanced", "f": "full"}
 
@@ -2711,7 +2711,7 @@ def slide(value, key, fallback, inherit=False):
     return None
 
 
-# С этой ширины — две панели (список | превью), уже — одна колонка.
+# С этой ширины - две панели (список | превью), уже - одна колонка.
 TWO_PANELS_WIDTH = 80
 
 
@@ -2727,7 +2727,7 @@ def panels(width):
 # Пауза после выбора, прежде чем звать icat: при пролистывании не запускаем зря.
 IMAGE_DELAY = 0.25
 
-# Удалить все картинки kitty на экране (q=2 — терминал ничего не отвечает).
+# Удалить все картинки kitty на экране (q=2 - терминал ничего не отвечает).
 KITTY_DELETE_IMAGES = b"\x1b_Ga=d,q=2\x1b\\"
 
 
@@ -2844,8 +2844,8 @@ def key_name(key):
 
 
 def edit_line(text, cursor, key):
-    # Один шаг однострочного редактора; key — из get_wch (str или int).
-    # -> (text, cursor, итог): итог None — продолжаем, "ok" или "cancel".
+    # Один шаг однострочного редактора; key - из get_wch (str или int).
+    # -> (text, cursor, итог): итог None - продолжаем, "ok" или "cancel".
     name = key_name(key)
 
     if name == "Enter":
@@ -2918,14 +2918,14 @@ class TUI:
     # ---------- сообщения и действия ----------
 
     def message(self, text, mark=False):
-        # mark: True — предупреждение из warn(), "✗" — ошибка действия.
+        # mark: True - предупреждение из warn(), "✗" - ошибка действия.
         prefix = {True: "⚠ ", "✗": "✗ "}.get(mark, "")
         self.log.append(prefix + text)
         self.status = self.log[-1]
 
     def act(self, function, *args, **kwargs):
         # Сообщения действия собираются в лог; ошибка или больше одной
-        # строки показываются окном, одна строка — в статусе внизу.
+        # строки показываются окном, одна строка - в статусе внизу.
         self.log = []
         failed = False
 
@@ -2965,7 +2965,7 @@ class TUI:
 
         finally:
             SINK = self.message
-            input("\nEnter — назад в vnature...")
+            input("\nEnter - назад в vnature...")
             curses.reset_prog_mode()
             self.scr.refresh()
 
@@ -2995,7 +2995,7 @@ class TUI:
                 0,
                 0,
                 f"Окно маловато ({height}×{width}), "
-                f"нужно хотя бы {MIN_HEIGHT}×{MIN_WIDTH}. q — выход",
+                f"нужно хотя бы {MIN_HEIGHT}×{MIN_WIDTH}. q - выход",
                 max(1, width - 1),
             )
         except curses.error:
@@ -3089,7 +3089,7 @@ class TUI:
             if len(lines) > rows:
                 self.put(3 + rows - 1, 2, f"… ещё {len(lines) - rows + 1}", curses.A_DIM)
 
-            self.put(height - 1, 2, "любая клавиша — дальше", curses.A_DIM)
+            self.put(height - 1, 2, "любая клавиша - дальше", curses.A_DIM)
             self.scr.refresh()
             self.hide_image()
 
@@ -3097,7 +3097,7 @@ class TUI:
                 return
 
     def ask(self, prompt, text=""):
-        # Строка ввода внутри curses: str или None (Esc). Кириллица — через get_wch.
+        # Строка ввода внутри curses: str или None (Esc). Кириллица - через get_wch.
         cursor = len(text)
 
         try:
@@ -3119,7 +3119,7 @@ class TUI:
                 room = max(1, width - 6)
                 start = max(0, cursor - room + 1)
                 self.put(row, 2, "> " + text[start:start + room])
-                self.put(row + 2, 2, "Enter — готово · Esc — отмена · Ctrl+U — очистить", curses.A_DIM)
+                self.put(row + 2, 2, "Enter - готово · Esc - отмена · Ctrl+U - очистить", curses.A_DIM)
 
                 try:
                     self.scr.move(row, min(width - 1, 4 + cursor - start))
@@ -3198,7 +3198,7 @@ class TUI:
         return value if value == "inherit" else kitty_mode_value(value)
 
     def live(self, value, preset):
-        # Живое применение: только kitty, через refresh_kitty; итог — в статус.
+        # Живое применение: только kitty, через refresh_kitty; итог - в статус.
         mode = self.stored(value)
         self.log = []
 
@@ -3231,12 +3231,12 @@ class TUI:
             return f"inherit → {kitty_label(self.cfg['kitty_mode'])}"
 
         if value == "off":
-            return "off — чистая база"
+            return "off - чистая база"
 
         return kitty_label(value)
 
     def draw_slider(self, first, x, width, value, preset, pending):
-        title = "Kitty: сила палитры — " + (f"пресет {preset}" if preset else "глобально")
+        title = "Kitty: сила палитры - " + (f"пресет {preset}" if preset else "глобально")
         self.put(first, x, title, self.role("accent"))
 
         bar = max(10, min(50, width - 26))
@@ -3254,12 +3254,12 @@ class TUI:
             marks[round(KITTY_MODES[mode][1] / 100 * (bar - 1))] = letter
         self.put(first + 3, x + 2, "".join(marks), self.role("muted"))
 
-        hints = "←/→ ±5% · Shift ±25% · a b f — точки · o — off" + (" · i — inherit" if preset else "")
+        hints = "←/→ ±5% · Shift ±25% · a b f - точки · o - off" + (" · i - inherit" if preset else "")
         self.put(first + 5, x, hints, self.role("muted"), width)
         self.put(
             first + 6,
             x,
-            "Enter — сохранить в " + ("пресет" if preset else "config") + " · Esc — вернуть как было",
+            "Enter - сохранить в " + ("пресет" if preset else "config") + " · Esc - вернуть как было",
             self.role("muted"),
             width,
         )
@@ -3269,7 +3269,7 @@ class TUI:
 
     def draw_kitty_preview(self, first, last, x, width, value, preset):
         if self.palette is None:
-            self.put(first, x, "темы пока нет — превью не из чего строить", self.role("muted"), width)
+            self.put(first, x, "темы пока нет - превью не из чего строить", self.role("muted"), width)
             return
 
         mode = self.stored(value)
@@ -3319,13 +3319,13 @@ class TUI:
             target = current_kitty_target(state, self.cfg, {preset: mode})
 
         if state is None:
-            note = "темы нет — применится при следующей теме"
+            note = "темы нет - применится при следующей теме"
         elif preset is not None and state["name"] != preset:
-            note = f"пресет {preset} не применён — применится при следующей теме"
+            note = f"пресет {preset} не применён - применится при следующей теме"
         elif target is None:
-            note = "текущая тема не из пресета — не затронет"
+            note = "текущая тема не из пресета - не затронет"
         elif target != kitty_mode_value(kitty_strength(effective)):
-            note = f"{state['name']} использует свой режим — глобальный ползунок на неё не влияет"
+            note = f"{state['name']} использует свой режим - глобальный ползунок на неё не влияет"
         else:
             note = f"применится к теме: {'из картинки' if state['name'] == '__temporary__' else state['name']}"
 
@@ -3410,7 +3410,7 @@ class TUI:
                     applied = original
 
                 if value != original:
-                    self.status = f"не сохранено — вернул {self.value_label(original)}"
+                    self.status = f"не сохранено - вернул {self.value_label(original)}"
                     value, due = original, None
 
                 if name == "q":
@@ -3470,7 +3470,7 @@ class TUI:
     def wallpaper_dir(self):
         raw = self.ask(
             f"Папка обоев: {self.cfg['wallpaper_dir']}\n"
-            "Новая папка (пусто — оставить):"
+            "Новая папка (пусто - оставить):"
         )
 
         if not raw:
@@ -3509,7 +3509,7 @@ class TUI:
                 pass
 
     def load_palette(self):
-        # Цвета TUI — из палитры текущей темы; перечитываем, когда она сменилась.
+        # Цвета TUI - из палитры текущей темы; перечитываем, когда она сменилась.
         path = CURRENT / "palette.conf"
 
         try:
@@ -3581,7 +3581,7 @@ class TUI:
 
         if state:
             theme = "из картинки" if state["name"] == "__temporary__" else state["name"]
-            wallpaper = Path(state["wallpaper"]).name if state.get("wallpaper") else "—"
+            wallpaper = Path(state["wallpaper"]).name if state.get("wallpaper") else "-"
             header = f" vnature · тема {theme} · обои {wallpaper} · kitty {kitty_label(state['kitty_mode'])}"
         else:
             header = " vnature · темы пока нет"
@@ -3711,7 +3711,7 @@ class TUI:
             (image.name, "accent"),
             (f"{size[0]}×{size[1]} · {mb:.1f} МБ" if size else f"{mb:.1f} МБ", None),
             (tilde(image.parent), "muted"),
-            ("в пресетах: " + (", ".join(bound) if bound else "—"), "muted"),
+            ("в пресетах: " + (", ".join(bound) if bound else "-"), "muted"),
         ])
         self.want_image(image, y + 1, last, x, width)
 
@@ -3762,7 +3762,7 @@ class TUI:
                 count = str(error)
 
             lines = [("Папка обоев", "accent"), (tilde(folder), None), (count, "muted"),
-                     ("", None), ("Enter — сменить; пишется в config.toml", "muted")]
+                     ("", None), ("Enter - сменить; пишется в config.toml", "muted")]
         else:
             raw = self.cfg.get("kitty_base")
 
@@ -3814,7 +3814,7 @@ class TUI:
 
         key = (str(path), stamp, (x, first, width, last - first + 1), pixels)
 
-        # image_want сбрасывается каждый кадр; отсчёт паузы — от смены запрошенной картинки.
+        # image_want сбрасывается каждый кадр; отсчёт паузы - от смены запрошенной картинки.
         if key != self.image_requested:
             self.image_requested = key
             self.image_since = time.monotonic()
@@ -3837,7 +3837,7 @@ class TUI:
 
     def sync_image(self):
         # После refresh: убрать старую картинку, показать нужную из кеша
-        # или дождаться фонового icat (декодирование больших JPG — секунды).
+        # или дождаться фонового icat (декодирование больших JPG - секунды).
         if not self.graphics:
             return
 
@@ -3891,7 +3891,7 @@ class TUI:
             self.sync_image()
 
     def image_timeout(self):
-        # Пока ждём icat или паузу перед ним — будим цикл каждые 100 мс.
+        # Пока ждём icat или паузу перед ним - будим цикл каждые 100 мс.
         if self.graphics and self.image_want is not None and self.image_want != self.image_shown:
             return 100
 
@@ -3964,7 +3964,7 @@ class TUI:
         if not image:
             return
 
-        mode = self.menu(image.name, ["Выбрать source color", "Мне пох — бери первый"])
+        mode = self.menu(image.name, ["Выбрать source color", "Мне пох - бери первый"])
 
         if mode is not None:
             self.apply_wallpaper(image, mode == 1)
@@ -3976,7 +3976,7 @@ class TUI:
 
         raw = self.ask(
             "База kitty: путь к теме kitty (background, foreground, color0–15)\n"
-            "Пусто — встроенная STABLE:",
+            "Пусто - встроенная STABLE:",
             self.cfg.get("kitty_base") or "",
         )
 
@@ -4097,7 +4097,7 @@ COMMANDS = {
     "apply": (["--eblo PRESET"], "применить пресет"),
     "image": (["--poh PATH"], "палитра из картинки"),
     "save": (["chotko"], "сохранить текущую тему как пресет"),
-    "undo": (["govno"], "вернуть предыдущую тему (повтор — обратно)"),
+    "undo": (["govno"], "вернуть предыдущую тему (повтор - обратно)"),
     "list": (["kto"], "список пресетов"),
     "status": (["cho"], "что применено сейчас"),
     "delete": (["nahui"], "удалить пресет"),
@@ -4170,7 +4170,7 @@ ARGPARSE_ERRORS = (
     (r"argument (\S+): expected one argument", "флагу {0} нужно значение"),
     (r"argument (\S+): ignored explicit argument '(.*)'", "флаг {0} не принимает значение: {1}"),
     (r"argument КОМАНДА: invalid choice: '(.*?)'",
-     "не понял: {0} — это не команда, не пресет и не картинка"),
+     "не понял: {0} - это не команда, не пресет и не картинка"),
 )
 
 
@@ -4270,7 +4270,7 @@ def build_parser():
     def add(name):
         aliases, text = COMMANDS[name]
 
-        # "--eblo PRESET" и "--poh PATH" — не алиасы argparse, только для справки
+        # "--eblo PRESET" и "--poh PATH" - не алиасы argparse, только для справки
         command = commands.add_parser(
             name,
             aliases=[a for a in aliases if not a.startswith("-")],
@@ -4367,7 +4367,7 @@ def main(argv=None):
         args.wallpaper_dir
     )
 
-    # Явно заданную папку проверяем сразу, папку из config.toml — при использовании.
+    # Явно заданную папку проверяем сразу, папку из config.toml - при использовании.
     if args.wallpaper_dir is not None:
         if not cfg["wallpaper_dir"].is_dir():
             raise VNatureError(
