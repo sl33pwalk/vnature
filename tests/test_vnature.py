@@ -1,16 +1,17 @@
 import contextlib
 import hashlib
-import importlib.machinery
-import importlib.util
+import importlib
 import io
 import os
 import struct
+import sys
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "vnature"
+sys.path.insert(0, str(SCRIPT.parent))
 
 
 class Isolated(unittest.TestCase):
@@ -22,10 +23,9 @@ class Isolated(unittest.TestCase):
         self.old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
 
-        loader = importlib.machinery.SourceFileLoader("vnature", str(SCRIPT))
-        spec = importlib.util.spec_from_loader("vnature", loader)
-        self.v = importlib.util.module_from_spec(spec)
-        loader.exec_module(self.v)
+        for name in [name for name in sys.modules if name.split(".")[0] == "vnature_pkg"]:
+            del sys.modules[name]
+        self.v = importlib.import_module("vnature_pkg")
 
         self.v.PRESETS = self.home / "presets"
         self.v.PRESETS.mkdir()

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vnature"
+dynamic = ["version"]
+description = "Wallpaper -> matugen -> one palette for kitty, waybar, hyprland, rofi, polybar, swaync and obsidian"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+vnature = "vnature_pkg.cli:run"
+
+[tool.setuptools]
+packages = ["vnature_pkg"]
+
+[tool.setuptools.dynamic]
+version = { attr = "vnature_pkg.common.VERSION" }
+
+[tool.setuptools.package-data]
+# Только шаблоны, без локальных *.before-* копий.
+vnature_pkg = ["templates/*.conf", "templates/*.css", "templates/*.ini", "templates/*.lua", "templates/*.rasi"]

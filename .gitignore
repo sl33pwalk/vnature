@@ -6,3 +6,8 @@ presets.v01-backup/
 
 # Personal saved themes
 presets/
+
+# Packaging
+build/
+dist/
+*.egg-info/
