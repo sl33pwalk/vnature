@@ -1,10 +1,13 @@
 import contextlib
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
 import os
+import struct
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "vnature"
@@ -30,8 +33,10 @@ class Isolated(unittest.TestCase):
 
         # Никаких сигналов настоящему kitty и вызовов hyprctl/swaync из тестов.
         self.calls = []
+        self.real = {}
         for name in ("reload_kitty", "reload_hyprland", "reload_swaync",
                      "reload_polybar", "set_wallpaper"):
+            self.real[name] = getattr(self.v, name)
             setattr(self.v, name, lambda *a, _name=name: self.calls.append(_name))
 
     def tearDown(self):
@@ -409,6 +414,104 @@ class KittyColors(Isolated):
                         self.assertNotIn("{{", staged.read_text())
 
 
+# sha256[:16] kitty.conf, снятые со старой реализации режимов (до шкалы силы)
+# на синтетических палитрах KittyColors.palettes(): старые режимы не должны меняться.
+GOLDEN_KITTY = {
+    "flat-336699/accent": "21c5e6b2a54aa6c8",
+    "flat-336699/balanced": "7af6d17d8353151f",
+    "flat-336699/full": "7b15a126b53202ed",
+    "flat-336699/off": "558b0d24238a802c",
+    "grey/accent": "0508fcb2e9e749de",
+    "grey/balanced": "8a5dcb5768102412",
+    "grey/full": "6bc40e3c702f9f57",
+    "grey/off": "558b0d24238a802c",
+    "light/accent": "df6c2195348adb6d",
+    "light/balanced": "6c5eb6a0b80a7acb",
+    "light/full": "d1f5156abb289f3f",
+    "light/off": "558b0d24238a802c",
+    "neon/accent": "7ca134d4fd32e74d",
+    "neon/balanced": "f6be17ecf3a03525",
+    "neon/full": "40302cb12dff3886",
+    "neon/off": "558b0d24238a802c",
+}
+
+
+class KittyStrength(Isolated):
+
+    palettes = KittyColors.palettes
+
+    def test_parse(self):
+        ok = {"accent": 15, "balanced": 50, "full": 100, "off": "off",
+              0: 0, 35: 35, 100: 100, "35": 35, "35%": 35, " 70 ": 70}
+        for value, expected in ok.items():
+            with self.subTest(value=value):
+                self.assertEqual(self.v.kitty_strength(value), expected)
+        for value in (101, -5, "101", "abc", "", True, 3.5, None, "inherit"):
+            with self.subTest(value=value):
+                self.assertIsNone(self.v.kitty_strength(value))
+
+    def test_storage_value_and_label(self):
+        self.assertEqual(self.v.kitty_mode_value(15), "accent")
+        self.assertEqual(self.v.kitty_mode_value(35), 35)
+        self.assertEqual(self.v.kitty_mode_value("off"), "off")
+        self.assertEqual(self.v.normalize_kitty_mode("50", "accent"), "balanced")
+        self.assertEqual(self.v.normalize_kitty_mode("мусор", "accent"), "accent")
+        self.assertEqual(self.v.kitty_label("balanced"), "50% (balanced)")
+        self.assertEqual(self.v.kitty_label(35), "35%")
+        self.assertEqual(self.v.kitty_label("off"), "off")
+        self.assertEqual(self.v.kitty_label("inherit"), "inherit")
+
+    def test_curve(self):
+        self.assertEqual(self.v.kitty_params(15), (0.06, 0.0))
+        self.assertEqual(self.v.kitty_params(50), (0.35, 0.4))
+        self.assertEqual(self.v.kitty_params(100), (1.0, 0.8))
+        self.assertEqual(self.v.kitty_params(0), (0.0, 0.0))
+        self.assertIsNone(self.v.kitty_params("off"))
+        values = [self.v.kitty_params(s) for s in range(0, 101, 5)]
+        for (s1, a1), (s2, a2) in zip(values, values[1:]):
+            self.assertLessEqual(s1, s2)
+            self.assertLessEqual(a1, a2)
+
+    def render(self, palette, mode):
+        text = self.v.render_template(self.v.TEMPLATES / "kitty.conf",
+                                      {**palette, **self.v.kitty_colors(palette, mode)})
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def test_old_modes_byte_identical(self):
+        palettes = self.palettes()
+        for key, expected in GOLDEN_KITTY.items():
+            name, mode = key.split("/")
+            with self.subTest(key=key):
+                self.assertEqual(self.render(palettes[name], mode), expected)
+                if mode != "off":
+                    point = self.v.KITTY_MODES[mode][1]
+                    self.assertEqual(self.render(palettes[name], point), expected)
+
+    def test_numbers_in_config_preset_state(self):
+        self.v.CONFIG_FILE.write_text("kitty_mode = 35\n")
+        self.assertEqual(self.v.load_config()["kitty_mode"], 35)
+        self.v.CONFIG_FILE.write_text('kitty_mode = "50"\n')
+        self.assertEqual(self.v.load_config()["kitty_mode"], "balanced")
+        self.v.CONFIG_FILE.write_text("kitty_mode = 500\n")
+        self.assertEqual(self.v.load_config()["kitty_mode"], "accent")
+
+        self.v.set_config_key("kitty_mode", 70)
+        self.assertIn("kitty_mode = 70\n", self.v.CONFIG_FILE.read_text())
+
+        (self.v.PRESETS / "p").mkdir()
+        (self.v.PRESETS / "p" / "palette.conf").write_text("x=1\n")
+        self.v.save_preset_meta("p", kitty_mode=35)
+        self.assertIn("kitty_mode = 35\n", (self.v.PRESETS / "p" / "preset.toml").read_text())
+        self.assertEqual(self.v.load_preset("p")["kitty_mode"], 35)
+        self.v.save_preset_meta("p", kitty_mode=100)
+        self.assertEqual(self.v.load_preset("p")["kitty_mode"], "full")
+        with self.assertRaises(self.v.VNatureError):
+            self.v.save_preset_meta("p", kitty_mode=101)
+
+        self.v.write_state(self.home, name="x", wallpaper=None, kitty_mode=35)
+        self.assertEqual(self.v.read_state(self.home)["kitty_mode"], 35)
+
+
 class KittyRefresh(Isolated):
 
     def setUp(self):
@@ -517,6 +620,280 @@ class KittyRefresh(Isolated):
         self.assertIn("kitty не найден", message)
         self.assertEqual(self.state_mode(), "full")
         self.assertEqual(self.calls, [])
+
+
+class TuiPieces(Isolated):
+
+    def type_keys(self, keys, text="", cursor=None):
+        cursor = len(text) if cursor is None else cursor
+        result = None
+        for key in keys:
+            text, cursor, result = self.v.edit_line(text, cursor, key)
+        return text, cursor, result
+
+    def test_edit_line_cyrillic_and_editing(self):
+        curses = self.v.curses
+        self.assertEqual(self.type_keys(list("привет") + ["\n"]), ("привет", 6, "ok"))
+        self.assertEqual(self.type_keys(["\x7f", "\x7f", "ё", "\n"], "тема"), ("теё", 3, "ok"))
+        self.assertEqual(self.type_keys([curses.KEY_LEFT, curses.KEY_LEFT, "ж"], "абв"), ("ажбв", 2, None))
+        self.assertEqual(self.type_keys([curses.KEY_HOME, curses.KEY_DC], "абв"), ("бв", 0, None))
+        self.assertEqual(self.type_keys(["\x15", "x"], "мусор"), ("x", 1, None))
+        self.assertEqual(self.type_keys(["\x1b"], "a")[2], "cancel")
+        self.assertEqual(self.type_keys([curses.KEY_BACKSPACE], "")[0:2], ("", 0))
+        self.assertEqual(self.type_keys(["\x07"], "a")[0], "a")  # непечатное игнорируем
+
+    def test_scroll_top(self):
+        self.assertEqual(self.v.scroll_top(0, 0, 5), 0)
+        self.assertEqual(self.v.scroll_top(7, 0, 5), 3)
+        self.assertEqual(self.v.scroll_top(2, 3, 5), 2)
+        self.assertEqual(self.v.scroll_top(4, 3, 5), 3)
+
+    def test_key_names(self):
+        curses = self.v.curses
+        self.assertEqual(self.v.key_name("\n"), "Enter")
+        self.assertEqual(self.v.key_name(curses.KEY_ENTER), "Enter")
+        self.assertEqual(self.v.key_name("\x1b"), "Esc")
+        self.assertEqual(self.v.key_name(curses.KEY_SRIGHT), "S-→")
+        self.assertEqual(self.v.key_name("ж"), "ж")
+        self.assertIsNone(self.v.key_name(curses.KEY_F1))
+
+    def test_nearest256(self):
+        n = self.v.nearest256
+        self.assertEqual(n("#000000"), 16)
+        self.assertEqual(n("#ffffff"), 231)
+        self.assertEqual(n("#ff0000"), 196)
+        self.assertEqual(n("#5f87af"), 67)
+        self.assertEqual(n("#808080"), 244)
+        self.assertEqual(n("#7f7f7f"), 244)
+
+    def test_keymap_has_no_conflicts_and_covers_actions(self):
+        keymap = self.v.KEYMAP
+        common = {k for keys, _ in keymap["общие"] for k in keys}
+        tui = self.v.TUI.__new__(self.v.TUI)
+        for context, entries in keymap.items():
+            if context == "общие":
+                continue
+            keys = [k for group, _ in entries for k in group]
+            with self.subTest(context=context):
+                self.assertEqual(len(keys), len(set(keys)), "дубли внутри раздела")
+                self.assertFalse(set(keys) & common, "пересечение с общими клавишами")
+                self.assertLessEqual(set(tui.actions(context)), set(keys), "действие без строки в справке")
+
+    def test_slide(self):
+        slide = self.v.slide
+        cases = [
+            ((50, "→", 0), 55), ((37, "←", 0), 35), ((37, "l", 0), 40), ((0, "h", 0), 0),
+            ((100, "→", 0), 100), (("off", "→", 15), 20), (("inherit", "←", 50), 45),
+            ((90, "S-→", 0), 100), ((10, "H", 0), 0), ((40, "L", 0), 65),
+            ((70, "a", 0), 15), ((70, "b", 0), 50), ((70, "f", 0), 100), ((70, "o", 0), "off"),
+            ((70, "x", 0), None), ((70, "j", 0), None),
+        ]
+        for args, expected in cases:
+            with self.subTest(args=args):
+                self.assertEqual(slide(*args), expected)
+        self.assertIsNone(slide(70, "i", 0))
+        self.assertEqual(slide(70, "i", 0, inherit=True), "inherit")
+
+    def test_panels(self):
+        self.assertEqual(self.v.panels(79)[2], None)
+        x, left, right, right_width = self.v.panels(100)
+        self.assertIsNotNone(right)
+        self.assertGreaterEqual(left, 30)
+        self.assertLessEqual(right + right_width, 100)
+        self.assertEqual(self.v.panels(200)[1], 48)
+
+    def test_image_size(self):
+        png = self.home / "a.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 6094, 2832) + b"\x08\x02")
+        self.assertEqual(self.v.image_size(png), (6094, 2832))
+
+        jpg = self.home / "a.jpg"
+        app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00" + b"\x00" * 9
+        sof = b"\xff\xc0" + struct.pack(">H", 17) + b"\x08" + struct.pack(">HH", 3648, 5472) + b"\x03" + b"\x00" * 9
+        jpg.write_bytes(b"\xff\xd8" + app0 + sof + b"\xff\xd9")
+        self.assertEqual(self.v.image_size(jpg), (5472, 3648))
+
+        junk = self.home / "a.webp"
+        junk.write_bytes(b"RIFF....WEBP")
+        self.assertIsNone(self.v.image_size(junk))
+        self.assertIsNone(self.v.image_size(self.home / "нет.png"))
+
+    def test_tab_key(self):
+        self.assertEqual(self.v.tab_key("1", 3), 0)
+        self.assertEqual(self.v.tab_key("4", 0), 3)
+        self.assertEqual(self.v.tab_key("Tab", 3), 0)
+        self.assertEqual(self.v.tab_key("S-Tab", 0), 3)
+        self.assertIsNone(self.v.tab_key("5", 0))
+        self.assertIsNone(self.v.tab_key("q", 0))
+        self.assertEqual(self.v.TABS, ("Обои", "Пресеты", "Kitty", "Настройки"))
+
+    def test_messages_go_to_sink(self):
+        got = []
+        self.v.SINK = lambda text, error: got.append((text, error))
+        try:
+            self.v.info("раз")
+            self.v.warn("два")
+        finally:
+            self.v.SINK = None
+        self.assertEqual(got, [("раз", False), ("два", True)])
+
+
+class KittyReload(Isolated):
+
+    def test_skips_kitty_with_own_watcher(self):
+        proc = self.home / "proc"
+        def process(pid, comm, *argv):
+            (proc / pid).mkdir(parents=True)
+            (proc / pid / "comm").write_text(comm + "\n")
+            (proc / pid / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        process("100", "kitty", "kitty")
+        process("101", "kitty", "kitty")
+        process("200", "kitten", "/usr/bin/kitten", "__watch_conf__", "100", "100", "/x/kitty.conf")
+        process("300", "bash", "bash")
+        (proc / "self").mkdir()
+
+        sent = []
+        real_kill = self.v.os.kill
+        self.v.os.kill = lambda pid, sig: sent.append((pid, sig))
+        try:
+            self.real["reload_kitty"](proc)
+        finally:
+            self.v.os.kill = real_kill
+        self.assertEqual(sent, [(101, self.v.signal.SIGUSR1)])
+
+
+class TuiImage(Isolated):
+
+    def tui(self):
+        tui = self.v.TUI.__new__(self.v.TUI)
+        tui.graphics = True
+        tui.image_want = tui.image_shown = tui.image_job = tui.image_requested = None
+        tui.image_since = 0.0
+        tui.image_cache = {}
+        tui.written = []
+        tui.tty_write = tui.written.append
+        return tui
+
+    def fake_popen(self):
+        test = self
+        test.spawned, test.killed = [], []
+
+        class FakePopen:
+            returncode = 0
+            def __init__(self, command, stdin, stdout, stderr):
+                test.spawned.append(command)
+                stdout.write(b"IMG")
+                self.command = command
+            def poll(self):
+                return 0
+            def kill(self):
+                test.killed.append(self.command)
+            def wait(self):
+                return 0
+
+        self.v.subprocess.Popen, real = FakePopen, self.v.subprocess.Popen
+        self.addCleanup(setattr, self.v.subprocess, "Popen", real)
+
+    def test_icat_command(self):
+        command = self.v.icat_command("/w/a.jpg", 1, (50, 4, 40, 20), (100, 30, 1000, 600))
+        self.assertEqual(command[:2], ["kitten", "icat"])
+        self.assertIn("--transfer-mode=stream", command)
+        self.assertIn("--use-window-size=100,30,1000,600", command)
+        self.assertIn("--place=40x20@50x4", command)
+        self.assertEqual(command[-1], "/w/a.jpg")
+
+    def test_background_job_cache_and_cleanup(self):
+        self.fake_popen()
+        tui = self.tui()
+        delete = self.v.KITTY_DELETE_IMAGES
+        a = ("/w/a.jpg", 1, (50, 4, 40, 20), (100, 30, 1000, 600))
+        b = ("/w/b.jpg", 1, (50, 4, 40, 20), (100, 30, 1000, 600))
+
+        tui.image_want = a
+        tui.sync_image()                      # пауза прошла — icat в фоне, в терминал пока ничего
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(tui.written, [])
+        tui.sync_image()                      # icat закончил — показываем, кладём в кеш
+        self.assertEqual(tui.written, [b"\x1b7IMG\x1b8"])
+        self.assertEqual(tui.image_shown, a)
+
+        tui.image_want, tui.image_since = b, self.v.time.monotonic()
+        tui.sync_image()                      # другой выбор: старую картинку убрать, icat ещё не звать
+        self.assertEqual(tui.written[-1], delete)
+        self.assertEqual(len(self.spawned), 1)
+
+        tui.image_want = a
+        tui.sync_image()                      # снова a — из кеша, без icat
+        self.assertEqual(tui.written[-1], b"\x1b7IMG\x1b8")
+        self.assertEqual(len(self.spawned), 1)
+
+        tui.image_want = None
+        tui.sync_image()
+        self.assertEqual(tui.written[-1], delete)
+        self.assertIsNone(tui.image_shown)
+
+    def test_debounce_survives_frames(self):
+        # Регрессия: draw_chrome обнуляет image_want каждый кадр — пауза не должна перезапускаться.
+        self.fake_popen()
+        tui = self.tui()
+        tui.put = tui.role = lambda *a, **k: 0
+        image = self.home / "a.png"
+        image.write_bytes(b"x")
+        self.v.window_pixels = lambda: (100, 30, 1000, 600)
+        tui.want_image(image, 5, 25, 50, 40)
+        since = tui.image_since
+        for _ in range(3):
+            tui.image_want = None             # как draw_chrome на новом кадре
+            tui.want_image(image, 5, 25, 50, 40)
+        self.assertEqual(tui.image_since, since)
+        tui.image_since -= 1
+        tui.sync_image()
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_overlay_hides_but_keeps_job(self):
+        self.fake_popen()
+        tui = self.tui()
+        a = ("/w/a.jpg", 1, (0, 0, 20, 10), (1, 1, 1, 1))
+        tui.image_want = a
+        tui.sync_image()                      # icat запущен
+        tui.image_want = None
+        tui.sync_image()                      # открыли справку
+        self.assertEqual(self.killed, [])
+        self.assertIsNotNone(tui.image_job)
+        tui.image_want = a
+        tui.sync_image()                      # закрыли — результат готов, без второго icat
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(tui.image_shown, a)
+
+    def test_stale_job_is_killed(self):
+        self.fake_popen()
+        tui = self.tui()
+        tui.image_want = ("/w/c.jpg", 1, (0, 0, 20, 10), (1, 1, 1, 1))
+        tui.sync_image()
+        tui.image_want = ("/w/d.jpg", 1, (0, 0, 20, 10), (1, 1, 1, 1))
+        tui.sync_image()
+        self.assertEqual(len(self.killed), 1)
+        self.assertEqual(self.killed[0][-1], "/w/c.jpg")
+
+    def test_graphics_only_in_real_kitty(self):
+        tui = self.v.TUI.__new__(self.v.TUI)
+        self.v.window_pixels = lambda: (100, 30, 1000, 600)
+        self.v.shutil.which, real_which = (lambda name: "/usr/bin/kitten"), self.v.shutil.which
+        self.addCleanup(setattr, self.v.shutil, "which", real_which)
+        cases = (
+            ({"TERM": "xterm-kitty"}, True),
+            ({"TERM": "xterm-256color", "KITTY_WINDOW_ID": "1"}, True),
+            ({"TERM": "xterm-kitty", "TMUX": "/tmp/x"}, False),
+            ({"TERM": "tmux-256color"}, False),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env), unittest.mock.patch.dict(os.environ, env, clear=True):
+                tui.setup_graphics()
+                self.assertEqual(tui.graphics, expected)
+        self.v.window_pixels = lambda: None
+        with unittest.mock.patch.dict(os.environ, {"TERM": "xterm-kitty"}, clear=True):
+            tui.setup_graphics()
+            self.assertFalse(tui.graphics)
 
 
 class KittyBase(Isolated):
